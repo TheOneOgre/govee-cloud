@@ -68,7 +68,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         await async_unload_entry(hass, entry)
         raise PlatformNotReady()
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except ImportError as exc:
+        logging.error("Platform not found ({}).".format(exc))
+        return False
 
     return True
 
