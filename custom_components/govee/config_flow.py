@@ -1,6 +1,5 @@
 """Config flow for Govee integration."""
 
-import asyncio
 import logging
 
 from govee_api_laggat import Govee, GoveeNoLearningStorage, GoveeError
@@ -27,16 +26,10 @@ async def validate_api_key(hass: core.HomeAssistant, user_input):
     Return info that you want to store in the config entry.
     """
     api_key = user_input[CONF_API_KEY]
-    # Run potentially blocking SSL operations in a thread pool
-    hub = await asyncio.to_thread(
-        Govee, api_key, learning_storage=GoveeNoLearningStorage()
-    )
-    try:
+    async with Govee(api_key, learning_storage=GoveeNoLearningStorage()) as hub:
         _, error = await hub.get_devices()
         if error:
             raise CannotConnect(error)
-    finally:
-        await hub.close()
 
     # Return info that you want to store in the config entry.
     return user_input
@@ -50,15 +43,8 @@ async def validate_disabled_attribute_updates(hass: core.HomeAssistant, user_inp
     disable_str = user_input[CONF_DISABLE_ATTRIBUTE_UPDATES]
     if disable_str:
         # we have something to check, connect without API key
-        # Run potentially blocking SSL operations in a thread pool
-        hub = await asyncio.to_thread(
-            Govee, "", learning_storage=GoveeNoLearningStorage()
-        )
-        try:
-            # this will throw an GoveeError if something fails
+c            # this will throw an GoveeError if something fails
             hub.ignore_device_attributes(disable_str)
-        finally:
-            await hub.close()
 
     # Return info that you want to store in the config entry.
     return user_input
