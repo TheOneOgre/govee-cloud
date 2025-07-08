@@ -11,7 +11,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_API_KEY
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import PlatformNotReady
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DOMAIN
 from .learning_storage import GoveeLearningStorage
@@ -94,8 +93,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         await async_unload_entry(hass, entry)
         raise PlatformNotReady()
 
-    for component in PLATFORMS:
-        await hass.config_entries.async_forward_entry_setups(entry, component)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
 
