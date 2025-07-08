@@ -43,7 +43,8 @@ async def validate_disabled_attribute_updates(hass: core.HomeAssistant, user_inp
     disable_str = user_input[CONF_DISABLE_ATTRIBUTE_UPDATES]
     if disable_str:
         # we have something to check, connect without API key
-c            # this will throw an GoveeError if something fails
+        async with Govee("", learning_storage=GoveeNoLearningStorage()) as hub:
+            # this will throw an GoveeError if something fails
             hub.ignore_device_attributes(disable_str)
 
     # Return info that you want to store in the config entry.
