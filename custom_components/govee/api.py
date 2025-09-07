@@ -69,10 +69,10 @@ class GoveeClient:
 
     async def _rate_limit_delay(self):
         if self._remaining <= self._rate_limit_on:
-            sleep_sec = max(0, self._reset - int(time.time()))
-            if sleep_sec > 0:
-                _LOGGER.warning("Rate limit hit, sleeping for %ss", sleep_sec)
-                await asyncio.sleep(sleep_sec)
+            reset_in = max(0, self._reset - int(time.time()))
+            _LOGGER.warning("Rate limit reached, skipping updates for %ss", reset_in)
+            return []
+
 
     def _track_rate_limit(self, response: aiohttp.ClientResponse):
         if "Rate-Limit-Total" in response.headers:

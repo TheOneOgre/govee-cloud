@@ -5,7 +5,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries, core, exceptions
 import homeassistant.helpers.config_validation as cv
-from homeassistant.const import CONF_API_KEY, CONF_DELAY
+from homeassistant.const import CONF_API_KEY, CONF_DELAY, CONF_SCAN_INTERVAL
 from homeassistant.core import callback
 
 from .const import (
@@ -14,11 +14,15 @@ from .const import (
     CONF_USE_ASSUMED_STATE,
     DOMAIN,
 )
+
 from .api import GoveeClient
 from .learning_storage import GoveeLearningStorage
 
-_LOGGER = logging.getLogger(__name__)
 
+
+_LOGGER = logging.getLogger(__name__)
+CONF_POLLING_MODE = "polling_mode"   # "auto" or "manual"
+DEFAULT_SCAN_INTERVAL = 60
 
 async def validate_api_key(hass: core.HomeAssistant, user_input: dict):
     """Validate that the API key works by attempting to fetch devices."""
@@ -118,14 +122,14 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
                 self.options.update(user_input)
                 return self.async_create_entry(title="Govee", data=self.options)
 
+        # Build schema every time (not just on error)
         options_schema = vol.Schema(
             {
                 vol.Required(CONF_API_KEY, default=old_api_key): cv.string,
                 vol.Optional(
                     CONF_DELAY,
-                    default=self.config_entry.options.get(
-                        CONF_DELAY, self.config_entry.data.get(CONF_DELAY, 10)
-                    ),
+                    default=0,  # default = auto
+                    description={"note": "{polling_note}"}
                 ): cv.positive_int,
                 vol.Required(
                     CONF_USE_ASSUMED_STATE,
@@ -142,11 +146,23 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
             }
         )
 
+
         return self.async_show_form(
             step_id="user",
             data_schema=options_schema,
             errors=errors,
+            description_placeholders={
+                "polling_note": (
+                    "ℹ️ Set to **0** for automatic interval adjustment (recommended). "
+                    "Manual values are allowed, but note: the Govee API allows only "
+                    "**10,000 requests per day**. Too small a value may cause rate limiting."
+                )
+            },
         )
+
+
+
+
 
 
 class CannotConnect(exceptions.HomeAssistantError):

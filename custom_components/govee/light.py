@@ -2,8 +2,11 @@
 import logging
 from datetime import datetime, timedelta
 
+from homeassistant.util import color
 from homeassistant.util.color import value_to_brightness
-from propcache import cached_property
+from homeassistant.const import CONF_DELAY
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
@@ -12,14 +15,13 @@ from homeassistant.components.light import (
     ColorMode,
     LightEntity,
 )
-from homeassistant.const import CONF_DELAY
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.util import color
 
+from propcache import cached_property
 from .const import (
     DOMAIN,
     CONF_OFFLINE_IS_OFF,
     CONF_USE_ASSUMED_STATE,
+    CONF_POLLING_MODE, 
     COLOR_TEMP_KELVIN_MIN,
     COLOR_TEMP_KELVIN_MAX,
 )
@@ -29,6 +31,8 @@ from .models import GoveeDevice, GoveeSource
 _LOGGER = logging.getLogger(__name__)
 
 
+DEFAULT_SCAN_INTERVAL = 60  # safe fallback
+
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up the Govee Light platform."""
     _LOGGER.debug("Setting up Govee lights")
@@ -37,20 +41,57 @@ async def async_setup_entry(hass, entry, async_add_entities):
     entry_data = hass.data[DOMAIN].get(entry.entry_id) or hass.data[DOMAIN]
     hub = entry_data["hub"]
 
+    # Work out polling mode and delay
+    mode = options.get(CONF_POLLING_MODE, "auto")
+    delay = options.get(CONF_DELAY, config.get(CONF_DELAY, 0))
 
-    # polling interval
-    update_interval = timedelta(
-        seconds=options.get(CONF_DELAY, config.get(CONF_DELAY, 10))
+    if delay == 0:
+        # Auto calculation
+        devices, _ = await hub.get_devices()
+        num_devices = max(1, len(devices))
+
+        # 10,000 requests per day shared across devices
+        # → divide 86400 seconds/day by (10000 / num_devices)
+        safe_interval = max(30, int(86400 / (10000 / num_devices)))
+        delay = safe_interval
+
+    update_interval = timedelta(seconds=delay)
+    coordinator = GoveeDataUpdateCoordinator(
+        hass, _LOGGER, hub, update_interval=update_interval, config_entry=entry
     )
+
+
+    if mode == "auto":
+        # Get device count to scale safely
+        devices, _ = await hub.get_devices()
+        device_count = max(1, len(devices))
+        safe_delay = max(30, int(86400 * device_count / 10000))  # 10k/day quota
+        update_interval = timedelta(seconds=safe_delay)
+        _LOGGER.warning(
+            "Polling mode AUTO: %s devices → interval set to %ss (safe under 10k/day quota).",
+            device_count,
+            safe_delay,
+        )
+    else:  # manual mode
+        update_interval = timedelta(seconds=delay)
+        _LOGGER.warning(
+            "Polling mode MANUAL: interval set to %ss. Ensure this does not exceed 10k/day quota.",
+            delay,
+        )
+
+        # Fetch devices once here to add entities
+        devices, _ = await hub.get_devices()
+
+    # Coordinator drives updates
     coordinator = GoveeDataUpdateCoordinator(
         hass, _LOGGER, hub, update_interval=update_interval, config_entry=entry
     )
     await coordinator.async_refresh()
 
-    # Add devices from the hub
-    devices, _ = await hub.get_devices()
+    # Register light entities
     entities = [GoveeLightEntity(hub, entry.title, coordinator, dev) for dev in devices]
     async_add_entities(entities, update_before_add=False)
+
 
 
 class GoveeDataUpdateCoordinator(DataUpdateCoordinator):
