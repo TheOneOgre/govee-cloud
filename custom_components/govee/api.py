@@ -184,7 +184,8 @@ class GoveeClient:
             props = data["data"]["properties"]
             dev = self._devices[device_id]
             for p in props:
-                if p["online"] == False:
+                # Some properties objects don’t have "online"
+                if "online" in p and p["online"] is False:
                     dev.online = False
                 if p.get("powerState") == "on":
                     dev.power_state = True
@@ -197,5 +198,6 @@ class GoveeClient:
                     dev.color = (c["r"], c["g"], c["b"])
                 if "colorTemInKelvin" in p:
                     dev.color_temp = p["colorTemInKelvin"]
+            dev.online = True
 
             return True, None

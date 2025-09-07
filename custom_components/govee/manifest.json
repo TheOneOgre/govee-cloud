@@ -1,15 +1,19 @@
 {
   "domain": "govee",
   "name": "Govee",
-  "codeowners": ["@TheOneOgre"],
+  "codeowners": [
+    "@TheOneOgre"
+  ],
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/TheOneOgre/govee-cloud/blob/master/README.md",
   "homekit": {},
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/TheOneOgre/govee-cloud/issues",
-  "requirements": ["dacite==1.8.0"],
+  "requirements": [
+    "dacite==1.8.0"
+  ],
   "ssdp": [],
-  "version": "2025.6.1",
+  "version": "0.2.1",
   "zeroconf": []
 }
