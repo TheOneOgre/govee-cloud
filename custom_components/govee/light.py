@@ -73,11 +73,12 @@ async def async_setup_entry(hass, entry, async_add_entities):
         hass, _LOGGER, hub, update_interval=update_interval, config_entry=entry
     )
 
-    # Refresh first, so we start with real state
-    await coordinator.async_config_entry_first_refresh()
+    # Fetch initial devices with full state (calls /devices/state once each)
+    devices, _ = await hub.init_devices()
 
-    # Coordinator stores the latest device list
-    devices = coordinator.data or []
+    # Prime the coordinator with that data
+    coordinator.data = devices
+
 
     # Register light entities with fresh data
     entities = [GoveeLightEntity(hub, entry.title, coordinator, dev) for dev in devices]

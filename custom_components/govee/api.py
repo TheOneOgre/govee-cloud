@@ -123,6 +123,21 @@ class GoveeClient:
 
             return list(self._devices.values()), None
 
+    async def init_devices(self) -> Tuple[List[GoveeDevice], str | None]:
+        """Discover devices and fetch their initial state."""
+        devices, err = await self.get_devices()
+        if err:
+            return devices, err
+
+        # Fetch live state for each device
+        for dev in devices:
+            ok, state_err = await self.get_device_state(dev.device)
+            if not ok and state_err:
+                _LOGGER.warning("Failed to fetch initial state for %s: %s", dev.device, state_err)
+
+        return list(self._devices.values()), None
+
+
     async def _control(self, device: Union[str, GoveeDevice], command: str, value: Any) -> Tuple[bool, str | None]:
         if isinstance(device, str):
             device = self._devices.get(device)
@@ -153,3 +168,34 @@ class GoveeClient:
     async def set_color_temp(self, device, value: int): return await self._control(device, "colorTem", value)
     async def set_color(self, device, rgb: Tuple[int, int, int]): 
         return await self._control(device, "color", {"r": rgb[0], "g": rgb[1], "b": rgb[2]})
+
+    async def get_device_state(self, device_id: str) -> Tuple[bool, str | None]:
+        """Fetch current state of a device via API."""
+        payload = {"device": device_id, "model": self._devices[device_id].model}
+        await self._rate_limit_delay()
+        async with self._session.get(f"{_API_BASE}/devices/state", headers=self._headers(), params=payload) as resp:
+            self._track_rate_limit(resp)
+            if resp.status != 200:
+                return False, f"API error {resp.status}: {await resp.text()}"
+            data = await resp.json()
+            if "data" not in data or "properties" not in data["data"]:
+                return False, "Malformed state response"
+
+            props = data["data"]["properties"]
+            dev = self._devices[device_id]
+            for p in props:
+                if p["online"] == False:
+                    dev.online = False
+                if p.get("powerState") == "on":
+                    dev.power_state = True
+                if p.get("powerState") == "off":
+                    dev.power_state = False
+                if "brightness" in p:
+                    dev.brightness = p["brightness"]
+                if "color" in p:
+                    c = p["color"]
+                    dev.color = (c["r"], c["g"], c["b"])
+                if "colorTemInKelvin" in p:
+                    dev.color_temp = p["colorTemInKelvin"]
+
+            return True, None
