@@ -1,11 +1,6 @@
 """The Govee integration."""
 import asyncio
 import logging
-import ssl
-import certifi
-
-from govee_api_laggat import Govee
-import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_API_KEY
@@ -13,30 +8,26 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import PlatformNotReady
 
 from .const import DOMAIN
+from .api import GoveeClient
 from .learning_storage import GoveeLearningStorage
 
 _LOGGER = logging.getLogger(__name__)
-CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({})}, extra=vol.ALLOW_EXTRA)
-
-# supported platforms
 PLATFORMS = ["light"]
 
 
 def setup(hass, config):
-    """This setup does nothing, we use the async setup."""
-    hass.states.set("govee.state", "setup called")
+    """Legacy sync setup (unused)."""
     return True
 
 
 async def async_setup(hass: HomeAssistant, config: dict):
-    """Set up the Govee component."""
-    hass.states.async_set("govee.state", "async_setup called")
+    """Set up the Govee integration from YAML (not used, config entries only)."""
     hass.data[DOMAIN] = {}
     return True
 
 
 def is_online(online: bool):
-    """Log online/offline change."""
+    """Log when API appears offline/online."""
     msg = "API is offline."
     if online:
         msg = "API is back online."
@@ -46,49 +37,32 @@ def is_online(online: bool):
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up Govee from a config entry."""
 
-    # get vars from ConfigFlow/OptionsFlow
     config = entry.data
     options = entry.options
     api_key = options.get(CONF_API_KEY, config.get(CONF_API_KEY, ""))
 
-    # Setup connection with devices/cloud in executor
-    hub = await Govee.create(
-        api_key,
-        learning_storage=GoveeLearningStorage(hass.config.config_dir, hass),
-    )
+    # Create learning storage and API client
+    storage = GoveeLearningStorage(hass.config.config_dir, hass)
+    hub = await GoveeClient.create(api_key, storage)
 
+    hass.data[DOMAIN] = {"hub": hub}
 
-
-    # keep reference for disposing
-    hass.data[DOMAIN] = {}
-    hass.data[DOMAIN]["hub"] = hub
-
-    # inform when api is offline/online
-    hub.events.online += is_online
-
-    # Verify that passed in configuration works
-    _, err = await hub.get_devices()
+    # Verify API works by fetching devices
+    devices, err = await hub.get_devices()
     if err:
         _LOGGER.warning("Could not connect to Govee API: %s", err)
-
-        # If rate_limit_reset is present, log it (it's an int, not a coroutine)
-        if hasattr(hub, "rate_limit_reset"):
-            _LOGGER.debug("Rate limit resets at: %s", hub.rate_limit_reset)
-
+        await hub.close()
         await async_unload_entry(hass, entry)
         raise PlatformNotReady()
 
+    _LOGGER.info("Loaded %d Govee devices", len(devices))
 
-
-    # Forward setup to supported platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Unload a config entry."""
-
     unload_ok = all(
         await asyncio.gather(
             *[
@@ -99,8 +73,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     )
 
     if unload_ok:
-        hub = hass.data[DOMAIN].pop("hub")
-        await hub.close()
+        hub = hass.data[DOMAIN].pop("hub", None)
+        if hub:
+            await hub.close()
 
     return unload_ok
 
@@ -108,17 +83,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
 def _unload_component_entry(
     hass: HomeAssistant, entry: ConfigEntry, component: str
 ) -> bool:
-    """Unload an entry for a specific component."""
-    success = False
+    """Unload an entry for a specific platform."""
     try:
-        success = hass.config_entries.async_forward_entry_unload(entry, component)
+        return hass.config_entries.async_forward_entry_unload(entry, component)
     except ValueError:
-        # probably ValueError: Config entry was never loaded!
-        return success
+        # Config entry was never loaded
+        return False
     except Exception as ex:
         _LOGGER.warning(
             "Continuing on exception when unloading %s component's entry: %s",
             component,
             ex,
         )
-        return success
+        return False
