@@ -194,31 +194,50 @@ class GoveeLightEntity(LightEntity):
         dev = self._device
         if not dev:
             return
+
         err = None
         if ATTR_HS_COLOR in kwargs:
             hs_color = kwargs[ATTR_HS_COLOR]
             col = color.color_hs_to_RGB(hs_color[0], hs_color[1])
             _, err = await self._hub.set_color(dev, col)
+            if not err:
+                dev.color = col
+                dev.power_state = True
         elif ATTR_BRIGHTNESS in kwargs:
             bright = kwargs[ATTR_BRIGHTNESS]
             _, err = await self._hub.set_brightness(dev, bright)
+            if not err:
+                dev.brightness = bright
+                dev.power_state = True
         elif ATTR_COLOR_TEMP_KELVIN in kwargs:
             color_temp = kwargs[ATTR_COLOR_TEMP_KELVIN]
             color_temp = max(COLOR_TEMP_KELVIN_MIN, min(COLOR_TEMP_KELVIN_MAX, color_temp))
             _, err = await self._hub.set_color_temp(dev, color_temp)
+            if not err:
+                dev.color_temp = color_temp
+                dev.power_state = True
         else:
             _, err = await self._hub.turn_on(dev)
+            if not err:
+                dev.power_state = True
 
-        if err:
+        if not err:
+            self.async_write_ha_state()
+        else:
             _LOGGER.warning("async_turn_on failed for %s: %s", dev.device, err)
+
 
     async def async_turn_off(self, **kwargs):
         dev = self._device
         if not dev:
             return
         _, err = await self._hub.turn_off(dev)
-        if err:
+        if not err:
+            dev.power_state = False
+            self.async_write_ha_state()
+        else:
             _LOGGER.warning("async_turn_off failed for %s: %s", dev.device, err)
+
 
     @property
     def name(self):
