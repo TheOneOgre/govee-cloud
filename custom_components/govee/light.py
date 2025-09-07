@@ -169,16 +169,13 @@ class GoveeLightEntity(LightEntity):
 
     @property
     def supported_color_modes(self) -> set[ColorMode]:
-        modes = set()
         if self._device.support_color:
-            modes.add(ColorMode.HS)
+            return {ColorMode.HS}
         if self._device.support_color_temp:
-            modes.add(ColorMode.COLOR_TEMP)
-        if self._device.support_brightness:
-            modes.add(ColorMode.BRIGHTNESS)
-        if not modes:
-            modes.add(ColorMode.ONOFF)
-        return modes
+            return {ColorMode.COLOR_TEMP}
+        return {ColorMode.ONOFF}
+
+
 
     @property
     def color_mode(self) -> ColorMode:
