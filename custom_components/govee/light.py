@@ -126,134 +126,128 @@ class GoveeLightEntity(LightEntity):
         self._hub = hub
         self._title = title
         self._coordinator = coordinator
-        self._device = device
+        self._device_id = device.device  # store only ID
+
+    @property
+    def _device(self) -> GoveeDevice | None:
+        """Always return the current device object from coordinator.data."""
+        if not self._coordinator.data:
+            return None
+        return next((d for d in self._coordinator.data if d.device == self._device_id), None)
 
     async def async_added_to_hass(self):
         self._coordinator.async_add_listener(self.async_write_ha_state)
 
     @property
     def is_on(self):
-        return self._device.power_state
+        dev = self._device
+        return dev.power_state if dev else False
 
     @property
     def brightness(self):
-        return self._device.brightness if self._device.support_brightness else None
+        dev = self._device
+        return dev.brightness if dev and dev.support_brightness else None
 
     @property
     def hs_color(self):
-        return color.color_RGB_to_hs(*self._device.color) if self._device.support_color else None
+        dev = self._device
+        return color.color_RGB_to_hs(*dev.color) if dev and dev.support_color else None
 
     @property
     def rgb_color(self):
-        return list(self._device.color) if self._device.support_color else None
+        dev = self._device
+        return list(dev.color) if dev and dev.support_color else None
 
     @property
     def color_temp_kelvin(self):
-        return self._device.color_temp if self._device.support_color_temp else None
-
-    @property
-    def min_color_temp_kelvin(self):
-        return COLOR_TEMP_KELVIN_MIN
-
-    @property
-    def max_color_temp_kelvin(self):
-        return COLOR_TEMP_KELVIN_MAX
+        dev = self._device
+        return dev.color_temp if dev and dev.support_color_temp else None
 
     @property
     def supported_color_modes(self) -> set[ColorMode]:
-        if self._device.support_color:
+        dev = self._device
+        if not dev:
+            return {ColorMode.ONOFF}
+        if dev.support_color:
             return {ColorMode.HS}
-        if self._device.support_color_temp:
+        if dev.support_color_temp:
             return {ColorMode.COLOR_TEMP}
+        if dev.support_brightness:
+            return {ColorMode.BRIGHTNESS}
         return {ColorMode.ONOFF}
-
-
 
     @property
     def color_mode(self) -> ColorMode:
-        if self._device.color_temp > 0:
+        dev = self._device
+        if not dev:
+            return ColorMode.ONOFF
+        if dev.color_temp > 0:
             return ColorMode.COLOR_TEMP
-        if self._device.support_color and any(self._device.color):
+        if dev.support_color and any(dev.color):
             return ColorMode.HS
-        if self._device.support_brightness and self._device.brightness > 0:
+        if dev.support_brightness and dev.brightness > 0:
             return ColorMode.BRIGHTNESS
         return ColorMode.ONOFF
 
     async def async_turn_on(self, **kwargs):
+        dev = self._device
+        if not dev:
+            return
         err = None
         if ATTR_HS_COLOR in kwargs:
             hs_color = kwargs[ATTR_HS_COLOR]
             col = color.color_hs_to_RGB(hs_color[0], hs_color[1])
-            _, err = await self._hub.set_color(self._device, col)
-            if not err:
-                self._device.color = col
-                self._device.power_state = True
+            _, err = await self._hub.set_color(dev, col)
         elif ATTR_BRIGHTNESS in kwargs:
             bright = kwargs[ATTR_BRIGHTNESS]
-            _, err = await self._hub.set_brightness(self._device, bright)
-            if not err:
-                self._device.brightness = bright
-                self._device.power_state = True
+            _, err = await self._hub.set_brightness(dev, bright)
         elif ATTR_COLOR_TEMP_KELVIN in kwargs:
             color_temp = kwargs[ATTR_COLOR_TEMP_KELVIN]
             color_temp = max(COLOR_TEMP_KELVIN_MIN, min(COLOR_TEMP_KELVIN_MAX, color_temp))
-            _, err = await self._hub.set_color_temp(self._device, color_temp)
-            if not err:
-                self._device.color_temp = color_temp
-                self._device.power_state = True
+            _, err = await self._hub.set_color_temp(dev, color_temp)
         else:
-            _, err = await self._hub.turn_on(self._device)
-            if not err:
-                self._device.power_state = True
+            _, err = await self._hub.turn_on(dev)
 
-        if not err:
-            self.async_write_ha_state()  # 🔑 push update to HA immediately
-        else:
-            _LOGGER.warning("async_turn_on failed for %s: %s", self._device.device, err)
-
+        if err:
+            _LOGGER.warning("async_turn_on failed for %s: %s", dev.device, err)
 
     async def async_turn_off(self, **kwargs):
-        _, err = await self._hub.turn_off(self._device)
-        if not err:
-            self._device.power_state = False
-            self.async_write_ha_state()
-        else:
-            _LOGGER.warning("async_turn_off failed for %s: %s", self._device.device, err)
-
+        dev = self._device
+        if not dev:
+            return
+        _, err = await self._hub.turn_off(dev)
+        if err:
+            _LOGGER.warning("async_turn_off failed for %s: %s", dev.device, err)
 
     @property
     def name(self):
-        return self._device.device_name
+        dev = self._device
+        return dev.device_name if dev else "Unknown"
 
     @property
     def unique_id(self):
-        return f"govee_{self._title}_{self._device.device}"
+        return f"govee_{self._title}_{self._device_id}"
 
     @property
     def device_info(self):
+        dev = self._device
         return {
             "identifiers": {(DOMAIN, self.unique_id)},
-            "name": self._device.device_name,
+            "name": dev.device_name if dev else "Unknown",
             "manufacturer": "Govee",
-            "model": self._device.model,
+            "model": dev.model if dev else "Unknown",
         }
 
     @property
     def available(self):
-        return self._device.online
+        dev = self._device
+        return dev.online if dev else False
 
     @property
     def assumed_state(self):
+        dev = self._device
         return (
             self._coordinator.use_assumed_state
-            and self._device.source == GoveeSource.HISTORY
+            and dev
+            and dev.source == GoveeSource.HISTORY
         )
-
-    @property
-    def extra_state_attributes(self):
-        return {
-            "rate_limit_total": self._hub._limit,
-            "rate_limit_remaining": self._hub._remaining,
-            "rate_limit_reset": datetime.fromtimestamp(self._hub._reset).isoformat(),
-            "rate_limit_on": self._hub._rate_limit_on,
-        }
