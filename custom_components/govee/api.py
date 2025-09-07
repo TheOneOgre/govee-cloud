@@ -3,9 +3,9 @@ import aiohttp
 import asyncio
 import certifi
 import logging
-import math
 import ssl
 import time
+from aiohttp import ClientSession
 from typing import Any, Dict, List, Tuple, Union
 
 from .models import GoveeDevice, GoveeSource, GoveeLearnedInfo
@@ -15,7 +15,6 @@ _LOGGER = logging.getLogger(__name__)
 _API_BASE = "https://developer-api.govee.com/v1"
 _API_DEVICES = f"{_API_BASE}/devices"
 _API_CONTROL = f"{_API_BASE}/devices/control"
-_API_STATE = f"{_API_BASE}/devices/state"
 
 
 class GoveeClient:
@@ -24,6 +23,7 @@ class GoveeClient:
         self._storage = storage
         self._devices: Dict[str, GoveeDevice] = {}
         self._session: aiohttp.ClientSession | None = None
+        self._ssl_context: ssl.SSLContext | None = None  # define upfront
 
         # rate limit
         self._limit = 100
@@ -32,16 +32,37 @@ class GoveeClient:
         self._rate_limit_on = 5
 
     @classmethod
-    async def create(cls, api_key: str, storage):
-        self = GoveeClient(api_key, storage)
-        ssl_context = ssl.create_default_context(cafile=certifi.where())
-        self._session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context))
+    async def create(cls, api_key: str, storage, hass=None):
+        """Async-safe constructor."""
+        self = cls(api_key, storage)
+
+        # Async-safe SSL context creation
+        if hass is not None:
+            def _make_ssl():
+                return ssl.create_default_context(cafile=certifi.where())
+            self._ssl_context = await hass.async_add_executor_job(_make_ssl)
+        else:
+            self._ssl_context = ssl.create_default_context(cafile=certifi.where())
+
+        await self._init_session()
         return self
 
-    async def close(self):
-        if self._session:
+    async def _init_session(self):
+        """Initialize aiohttp session with SSL context."""
+        # Close existing session if already open (important for reloads)
+        if self._session and not self._session.closed:
             await self._session.close()
-            self._session = None
+
+        connector = aiohttp.TCPConnector(ssl=self._ssl_context)
+        self._session = ClientSession(connector=connector)
+
+
+    async def close(self):
+        """Gracefully close aiohttp session."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+        self._session = None
+
 
     def _headers(self):
         return {"Govee-API-Key": self._api_key}
@@ -112,7 +133,11 @@ class GoveeClient:
         if command not in device.support_cmds:
             return False, f"Command {command} not supported"
 
-        payload = {"device": device.device, "model": device.model, "cmd": {"name": command, "value": value}}
+        payload = {
+            "device": device.device,
+            "model": device.model,
+            "cmd": {"name": command, "value": value},
+        }
 
         await self._rate_limit_delay()
         async with self._session.put(_API_CONTROL, headers=self._headers(), json=payload) as resp:
@@ -126,4 +151,5 @@ class GoveeClient:
     async def turn_off(self, device): return await self._control(device, "turn", "off")
     async def set_brightness(self, device, value: int): return await self._control(device, "brightness", value)
     async def set_color_temp(self, device, value: int): return await self._control(device, "colorTem", value)
-    async def set_color(self, device, rgb: Tuple[int, int, int]): return await self._control(device, "color", {"r": rgb[0], "g": rgb[1], "b": rgb[2]})
+    async def set_color(self, device, rgb: Tuple[int, int, int]): 
+        return await self._control(device, "color", {"r": rgb[0], "g": rgb[1], "b": rgb[2]})
