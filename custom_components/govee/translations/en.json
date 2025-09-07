@@ -12,9 +12,10 @@
       "user": {
         "data": {
           "api_key": "API Key",
-          "delay": "Poll Interval"
+          "delay": "Polling Interval (set to 0 for auto)"
         },
-        "description": "Get your API Key from the Govee Home App. For Details see https://github.com/TheOneOgre/govee-cloud/blob/master/README.md"
+        "title": "Setup",
+        "description": "For details on obtaining an API key see: https://github.com/TheOneOgre/govee-cloud/blob/master/README.md"
       }
     }
   },
@@ -26,15 +27,15 @@
     },
     "step": {
       "user": {
-        "data": {
-          "api_key": "API Key (requires restart)",
-          "delay": "Poll Interval (requires restart)",
-          "use_assumed_state": "Use 'assumed state' (two buttons). Default: True",
-          "offline_is_off": "When a led is offline, show it as off (default doesn't change state). Default: False",
-          "disable_attribute_updates": "DISABLE state updates. Space to disable. Read the README above!"
-        },
+      "data": {
+        "api_key": "API Key (requires restart)",
+        "delay": "Polling Interval (0 = auto; API limit 10,000/day, requires restart)",
+        "use_assumed_state": "Use 'assumed state' (two buttons). Default: True",
+        "offline_is_off": "When a LED is offline, show it as off (default doesn’t change state). Default: False",
+        "disable_attribute_updates": "DISABLE state updates. Space to disable. Read the README above!"
+      },
         "title": "Options",
-        "description": "Configure the Govee integration. For Details see https://github.com/TheOneOgre/govee-cloud/blob/master/README.md"
+        "description": "For more details see the README: https://github.com/TheOneOgre/govee-cloud/blob/master/README.md"
       }
     }
   }
