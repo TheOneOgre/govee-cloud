@@ -46,25 +46,14 @@ async def async_setup_entry(hass, entry, async_add_entities):
     delay = options.get(CONF_DELAY, config.get(CONF_DELAY, 0))
 
     if delay == 0:
-        # Auto calculation
-        devices, _ = await hub.get_devices()
-        num_devices = max(1, len(devices))
-
-        # 10,000 requests per day shared across devices
-        # → divide 86400 seconds/day by (10000 / num_devices)
-        safe_interval = max(30, int(86400 / (10000 / num_devices)))
-        delay = safe_interval
-
-    update_interval = timedelta(seconds=delay)
-    coordinator = GoveeDataUpdateCoordinator(
-        hass, _LOGGER, hub, update_interval=update_interval, config_entry=entry
-    )
-
+        # Auto calculation: use count of devices to pick safe interval
+        tmp_devices, _ = await hub.get_devices()
+        num_devices = max(1, len(tmp_devices))
+        delay = max(30, int(86400 / (10000 / num_devices)))  # safe under 10k/day
 
     if mode == "auto":
-        # Get device count to scale safely
-        devices, _ = await hub.get_devices()
-        device_count = max(1, len(devices))
+        tmp_devices, _ = await hub.get_devices()
+        device_count = max(1, len(tmp_devices))
         safe_delay = max(30, int(86400 * device_count / 10000))  # 10k/day quota
         update_interval = timedelta(seconds=safe_delay)
         _LOGGER.warning(
@@ -79,17 +68,19 @@ async def async_setup_entry(hass, entry, async_add_entities):
             delay,
         )
 
-        # Fetch devices once here to add entities
-        devices, _ = await hub.get_devices()
-
     # Coordinator drives updates
     coordinator = GoveeDataUpdateCoordinator(
         hass, _LOGGER, hub, update_interval=update_interval, config_entry=entry
     )
+
+    # Fetch initial state immediately
     await coordinator.async_refresh()
 
-    # Register light entities
-    entities = [GoveeLightEntity(hub, entry.title, coordinator, dev) for dev in devices]
+    # Register light entities from coordinator.data (fresh state)
+    entities = [
+        GoveeLightEntity(hub, entry.title, coordinator, dev)
+        for dev in (coordinator.data or [])
+    ]
     async_add_entities(entities, update_before_add=False)
 
 
