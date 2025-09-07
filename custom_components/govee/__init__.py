@@ -43,28 +43,6 @@ def is_online(online: bool):
     _LOGGER.warning(msg)
 
 
-async def async_create_govee_safely(hass: HomeAssistant, api_key: str, learning_storage):
-    """Create Govee instance with SSL context pre-created to avoid blocking."""
-    # Pre-create SSL context in executor to avoid blocking the event loop
-    def _create_ssl_context():
-        return ssl.create_default_context(cafile=certifi.where())
-    
-    # Create SSL context in thread pool
-    ssl_context = await hass.async_add_executor_job(_create_ssl_context)
-    
-    # Temporarily patch ssl.create_default_context to return our pre-created context
-    original_create_default_context = ssl.create_default_context
-    ssl.create_default_context = lambda *args, **kwargs: ssl_context
-    
-    try:
-        # Now create the Govee instance - it will use our pre-created SSL context
-        hub = await Govee.create(api_key, learning_storage=learning_storage)
-        return hub
-    finally:
-        # Restore original function
-        ssl.create_default_context = original_create_default_context
-
-
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up Govee from a config entry."""
 
@@ -73,10 +51,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     options = entry.options
     api_key = options.get(CONF_API_KEY, config.get(CONF_API_KEY, ""))
 
-    # Setup connection with devices/cloud
-    hub = await hass.async_add_executor_job(
-        Govee.create, api_key, GoveeLearningStorage(hass.config.config_dir)
+    # Setup connection with devices/cloud in executor
+    hub = await Govee.create(
+        api_key,
+        learning_storage=GoveeLearningStorage(hass.config.config_dir, hass),
     )
+
+
+
     # keep reference for disposing
     hass.data[DOMAIN] = {}
     hass.data[DOMAIN]["hub"] = hub
@@ -88,19 +70,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     _, err = await hub.get_devices()
     if err:
         _LOGGER.warning("Could not connect to Govee API: %s", err)
-        await hub.rate_limit_delay()
+
+        # If rate_limit_reset is present, log it (it's an int, not a coroutine)
+        if hasattr(hub, "rate_limit_reset"):
+            _LOGGER.debug("Rate limit resets at: %s", hub.rate_limit_reset)
+
         await async_unload_entry(hass, entry)
         raise PlatformNotReady()
 
-<<<<<<< HEAD
-    try:
-        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    except ImportError as exc:
-        logging.error("Platform not found ({}).".format(exc))
-        return False
-=======
+
+
+    # Forward setup to supported platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
->>>>>>> scott/master
 
     return True
 

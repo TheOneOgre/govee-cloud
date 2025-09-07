@@ -68,10 +68,10 @@ class GoveeLearningStorage(GoveeAbstractLearningStorage):
     async def write(self, learned_info):
         """Save to yaml file (offloaded to executor)."""
         path = self._config_dir + LEARNING_STORAGE_YAML
-        leaned_dict = {device: asdict(learned_info[device]) for device in learned_info}
+        learned_dict = {device: asdict(learned_info[device]) for device in learned_info}
 
         def _blocking_write():
-            save_yaml(path, leaned_dict)
+            save_yaml(path, learned_dict)
 
         await self._hass.async_add_executor_job(_blocking_write)
         _LOGGER.info("Stored learning information to %s.", path)
