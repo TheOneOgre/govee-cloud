@@ -123,6 +123,9 @@ class GoveeDataUpdateCoordinator(DataUpdateCoordinator):
 class GoveeLightEntity(LightEntity):
     """Representation of a Govee light."""
 
+    _attr_min_color_temp_kelvin = COLOR_TEMP_KELVIN_MIN
+    _attr_max_color_temp_kelvin = COLOR_TEMP_KELVIN_MAX
+
     def __init__(self, hub: GoveeClient, title: str, coordinator: GoveeDataUpdateCoordinator, device: GoveeDevice):
         self._hub = hub
         self._title = title
