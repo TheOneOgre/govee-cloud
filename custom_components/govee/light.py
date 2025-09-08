@@ -208,48 +208,48 @@ class GoveeLightEntity(LightEntity):
         if ATTR_HS_COLOR in kwargs and dev.support_color:
             hs_color = kwargs[ATTR_HS_COLOR]
             col = color.color_hs_to_RGB(hs_color[0], hs_color[1])
-            _, err = await self._hub.set_color(dev, col)
-            if not err:
+            ok, err = await self._hub.set_color(dev, col)
+            if ok:
                 dev.color = col
                 dev.power_state = True
 
         elif ATTR_BRIGHTNESS in kwargs and dev.support_brightness:
             bright = kwargs[ATTR_BRIGHTNESS]
-            _, err = await self._hub.set_brightness(dev, bright)
-            if not err:
+            ok, err = await self._hub.set_brightness(dev, bright)
+            if ok:
                 dev.brightness = bright
                 dev.power_state = True
 
         elif ATTR_COLOR_TEMP_KELVIN in kwargs and dev.support_color_temp:
             color_temp = kwargs[ATTR_COLOR_TEMP_KELVIN]
             color_temp = max(COLOR_TEMP_KELVIN_MIN, min(COLOR_TEMP_KELVIN_MAX, color_temp))
-            _, err = await self._hub.set_color_temp(dev, color_temp)
-            if not err:
+            ok, err = await self._hub.set_color_temp(dev, color_temp)
+            if ok:
                 dev.color_temp = color_temp
                 dev.power_state = True
 
         else:
-            _, err = await self._hub.turn_on(dev)
-            if not err:
+            ok, err = await self._hub.turn_on(dev)
+            if ok:
                 dev.power_state = True
 
         if not err:
-            self.async_write_ha_state()
+            self.async_write_ha_state()  # push trusted state to HA
         else:
             _LOGGER.warning("async_turn_on failed for %s: %s", dev.device, err)
-
 
 
     async def async_turn_off(self, **kwargs):
         dev = self._device
         if not dev:
             return
-        _, err = await self._hub.turn_off(dev)
-        if not err:
+        ok, err = await self._hub.turn_off(dev)
+        if ok:
             dev.power_state = False
             self.async_write_ha_state()
         else:
             _LOGGER.warning("async_turn_off failed for %s: %s", dev.device, err)
+
 
 
     @property
