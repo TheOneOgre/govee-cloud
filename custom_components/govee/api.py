@@ -173,12 +173,31 @@ class GoveeClient:
 
 
 
-    async def turn_on(self, device): return await self._control(device, "turn", "on")
-    async def turn_off(self, device): return await self._control(device, "turn", "off")
-    async def set_brightness(self, device, value: int): return await self._control(device, "brightness", value)
-    async def set_color_temp(self, device, value: int): return await self._control(device, "colorTem", value)
-    async def set_color(self, device, rgb: Tuple[int, int, int]): 
-        return await self._control(device, "color", {"r": rgb[0], "g": rgb[1], "b": rgb[2]})
+    async def turn_on(self, device):
+        return await self._control(device, "turn", "on")
+
+    async def turn_off(self, device):
+        return await self._control(device, "turn", "off")
+
+    async def set_brightness(self, device, value: int):
+        # Convert 0–255 (HA) → 0–100 (Govee API)
+        percent = max(0, min(100, round(value / 255 * 100)))
+        return await self._control(device, "brightness", percent)
+
+    async def set_color_temp(self, device, value: int):
+        # Clamp to Govee’s supported Kelvin range
+        kelvin = max(2700, min(9000, value))
+        return await self._control(device, "colorTem", kelvin)
+
+    async def set_color(self, device, rgb: Tuple[int, int, int]):
+        # Defensive: only send if supported
+        if "color" not in device.support_cmds:
+            return False, "Device does not support color"
+        return await self._control(device, "color", {
+            "r": rgb[0],
+            "g": rgb[1],
+            "b": rgb[2]
+        })
 
     async def get_device_state(self, device_id: str) -> Tuple[bool, str | None]:
         """Fetch current state of a device via API."""

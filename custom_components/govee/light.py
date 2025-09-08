@@ -217,11 +217,13 @@ class GoveeLightEntity(LightEntity):
                 dev.power_state = True
 
         elif ATTR_BRIGHTNESS in kwargs and dev.support_brightness:
-            bright = kwargs[ATTR_BRIGHTNESS]
-            ok, err = await self._hub.set_brightness(dev, bright)
-            if ok or (err and "Rate limit" in err):
-                dev.brightness = bright
+            ha_bright = kwargs[ATTR_BRIGHTNESS]  # 0–255 from HA
+            ok, err = await self._hub.set_brightness(dev, ha_bright)
+            if ok:
+                # store the HA-side brightness so the UI reflects it immediately
+                dev.brightness = ha_bright
                 dev.power_state = True
+
 
         elif ATTR_COLOR_TEMP_KELVIN in kwargs and dev.support_color_temp:
             color_temp = kwargs[ATTR_COLOR_TEMP_KELVIN]
