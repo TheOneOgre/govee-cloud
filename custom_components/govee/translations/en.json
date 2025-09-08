@@ -1,0 +1,42 @@
+{
+  "title": "Govee",
+  "config": {
+    "abort": {
+      "already_configured": "Already configured. Only a single configuration possible."
+    },
+    "error": {
+      "cannot_connect": "Cannot connect. Is the API-Key correct and the internet connection working?",
+      "unknown": "Unknown Error."
+    },
+    "step": {
+      "user": {
+        "data": {
+          "api_key": "API Key",
+          "delay": "Polling Interval (set to 0 for auto)"
+        },
+        "title": "Setup",
+        "description": "For details on obtaining an API key see: https://github.com/TheOneOgre/govee-cloud/blob/master/README.md"
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "cannot_connect": "Cannot connect. Is the API-Key correct and the internet connection working?",
+      "unknown": "Unknown Error.",
+      "disabled_attribute_updates_wrong": "Wrong format, see README above."
+    },
+    "step": {
+      "user": {
+      "data": {
+        "api_key": "API Key (requires restart)",
+        "delay": "Polling Interval (0 = auto; API limit 10,000/day, requires restart)",
+        "use_assumed_state": "Use 'assumed state' (two buttons). Default: True",
+        "offline_is_off": "When a LED is offline, show it as off (default doesn’t change state). Default: False",
+        "disable_attribute_updates": "DISABLE state updates. Space to disable. Read the README above!"
+      },
+        "title": "Options",
+        "description": "For more details see the README: https://github.com/TheOneOgre/govee-cloud/blob/master/README.md"
+      }
+    }
+  }
+}
