@@ -157,12 +157,20 @@ class GoveeClient:
         await self._rate_limit_delay()
         async with self._session.put(_API_CONTROL, headers=self._headers(), json=payload) as resp:
             self._track_rate_limit(resp)
+
             if resp.status == 429:
-                return False, f"Rate limited: retry after {self._reset - int(time.time())}s"
+                retry = max(0, self._reset - int(time.time()))
+                _LOGGER.warning("Rate limited for %s: retry after %ss", device.device, retry)
+                # Soft success → let HA trust local state
+                return True, f"Rate limit: assumed success, retry in {retry}s"
+
             if resp.status != 200:
                 return False, f"API error {resp.status}: {await resp.text()}"
+
             result = await resp.json()
             return result.get("message") == "Success", None
+
+
 
 
     async def turn_on(self, device): return await self._control(device, "turn", "on")

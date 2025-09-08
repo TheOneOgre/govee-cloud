@@ -199,44 +199,49 @@ class GoveeLightEntity(LightEntity):
         return ColorMode.ONOFF
 
 
-    async def async_turn_on(self, **kwargs):
-        dev = self._device
-        if not dev:
-            return
+        async def async_turn_on(self, **kwargs):
+            dev = self._device
+            if not dev:
+                return
 
-        err = None
-        if ATTR_HS_COLOR in kwargs and dev.support_color:
-            hs_color = kwargs[ATTR_HS_COLOR]
-            col = color.color_hs_to_RGB(hs_color[0], hs_color[1])
-            ok, err = await self._hub.set_color(dev, col)
-            if ok:
-                dev.color = col
-                dev.power_state = True
+            err = None
+            ok = False
 
-        elif ATTR_BRIGHTNESS in kwargs and dev.support_brightness:
-            bright = kwargs[ATTR_BRIGHTNESS]
-            ok, err = await self._hub.set_brightness(dev, bright)
-            if ok:
-                dev.brightness = bright
-                dev.power_state = True
+            if ATTR_HS_COLOR in kwargs and dev.support_color:
+                hs_color = kwargs[ATTR_HS_COLOR]
+                col = color.color_hs_to_RGB(hs_color[0], hs_color[1])
+                ok, err = await self._hub.set_color(dev, col)
+                # Trust local update even if rate limited
+                if ok or (err and "Rate limit" in err):
+                    dev.color = col
+                    dev.power_state = True
 
-        elif ATTR_COLOR_TEMP_KELVIN in kwargs and dev.support_color_temp:
-            color_temp = kwargs[ATTR_COLOR_TEMP_KELVIN]
-            color_temp = max(COLOR_TEMP_KELVIN_MIN, min(COLOR_TEMP_KELVIN_MAX, color_temp))
-            ok, err = await self._hub.set_color_temp(dev, color_temp)
-            if ok:
-                dev.color_temp = color_temp
-                dev.power_state = True
+            elif ATTR_BRIGHTNESS in kwargs and dev.support_brightness:
+                bright = kwargs[ATTR_BRIGHTNESS]
+                ok, err = await self._hub.set_brightness(dev, bright)
+                if ok or (err and "Rate limit" in err):
+                    dev.brightness = bright
+                    dev.power_state = True
 
-        else:
-            ok, err = await self._hub.turn_on(dev)
-            if ok:
-                dev.power_state = True
+            elif ATTR_COLOR_TEMP_KELVIN in kwargs and dev.support_color_temp:
+                color_temp = kwargs[ATTR_COLOR_TEMP_KELVIN]
+                color_temp = max(COLOR_TEMP_KELVIN_MIN, min(COLOR_TEMP_KELVIN_MAX, color_temp))
+                ok, err = await self._hub.set_color_temp(dev, color_temp)
+                if ok or (err and "Rate limit" in err):
+                    dev.color_temp = color_temp
+                    dev.power_state = True
 
-        if not err:
-            self.async_write_ha_state()  # push trusted state to HA
-        else:
-            _LOGGER.warning("async_turn_on failed for %s: %s", dev.device, err)
+            else:
+                ok, err = await self._hub.turn_on(dev)
+                if ok or (err and "Rate limit" in err):
+                    dev.power_state = True
+
+            # Always push local state if we considered it valid
+            if ok or (err and "Rate limit" in err):
+                self.async_write_ha_state()
+            else:
+                _LOGGER.warning("async_turn_on failed for %s: %s", dev.device, err)
+
 
 
     async def async_turn_off(self, **kwargs):
