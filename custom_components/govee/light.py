@@ -169,26 +169,35 @@ class GoveeLightEntity(LightEntity):
         dev = self._device
         if not dev:
             return {ColorMode.ONOFF}
+
+        modes = set()
         if dev.support_color:
-            return {ColorMode.HS}
+            modes.add(ColorMode.HS)
         if dev.support_color_temp:
-            return {ColorMode.COLOR_TEMP}
-        if dev.support_brightness:
-            return {ColorMode.BRIGHTNESS}
-        return {ColorMode.ONOFF}
+            modes.add(ColorMode.COLOR_TEMP)
+        if dev.support_brightness and not (dev.support_color or dev.support_color_temp):
+            # brightness-only (like dimmers without color)
+            modes.add(ColorMode.BRIGHTNESS)
+        if not modes:
+            modes.add(ColorMode.ONOFF)
+        return modes
+
 
     @property
     def color_mode(self) -> ColorMode:
         dev = self._device
         if not dev:
             return ColorMode.ONOFF
-        if dev.color_temp > 0:
-            return ColorMode.COLOR_TEMP
-        if dev.support_color and any(dev.color):
+
+        # Prioritize based on what’s actually supported
+        if dev.support_color and dev.color and any(dev.color):
             return ColorMode.HS
-        if dev.support_brightness and dev.brightness > 0:
+        if dev.support_color_temp and dev.color_temp > 0:
+            return ColorMode.COLOR_TEMP
+        if dev.support_brightness:
             return ColorMode.BRIGHTNESS
         return ColorMode.ONOFF
+
 
     async def async_turn_on(self, **kwargs):
         dev = self._device
@@ -196,26 +205,29 @@ class GoveeLightEntity(LightEntity):
             return
 
         err = None
-        if ATTR_HS_COLOR in kwargs:
+        if ATTR_HS_COLOR in kwargs and dev.support_color:
             hs_color = kwargs[ATTR_HS_COLOR]
             col = color.color_hs_to_RGB(hs_color[0], hs_color[1])
             _, err = await self._hub.set_color(dev, col)
             if not err:
                 dev.color = col
                 dev.power_state = True
-        elif ATTR_BRIGHTNESS in kwargs:
+
+        elif ATTR_BRIGHTNESS in kwargs and dev.support_brightness:
             bright = kwargs[ATTR_BRIGHTNESS]
             _, err = await self._hub.set_brightness(dev, bright)
             if not err:
                 dev.brightness = bright
                 dev.power_state = True
-        elif ATTR_COLOR_TEMP_KELVIN in kwargs:
+
+        elif ATTR_COLOR_TEMP_KELVIN in kwargs and dev.support_color_temp:
             color_temp = kwargs[ATTR_COLOR_TEMP_KELVIN]
             color_temp = max(COLOR_TEMP_KELVIN_MIN, min(COLOR_TEMP_KELVIN_MAX, color_temp))
             _, err = await self._hub.set_color_temp(dev, color_temp)
             if not err:
                 dev.color_temp = color_temp
                 dev.power_state = True
+
         else:
             _, err = await self._hub.turn_on(dev)
             if not err:
@@ -225,6 +237,7 @@ class GoveeLightEntity(LightEntity):
             self.async_write_ha_state()
         else:
             _LOGGER.warning("async_turn_on failed for %s: %s", dev.device, err)
+
 
 
     async def async_turn_off(self, **kwargs):
