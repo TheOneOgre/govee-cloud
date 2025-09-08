@@ -165,6 +165,25 @@ class GoveeLightEntity(LightEntity):
         return dev.color_temp if dev and dev.support_color_temp else None
 
     @property
+    def min_color_temp_kelvin(self) -> int | None:
+        """Warmest color temperature supported in Kelvin.
+
+        Home Assistant is deprecating mired-based min/max; expose Kelvin instead.
+        """
+        dev = self._device
+        if not dev or not dev.support_color_temp:
+            return None
+        return COLOR_TEMP_KELVIN_MIN
+
+    @property
+    def max_color_temp_kelvin(self) -> int | None:
+        """Coldest color temperature supported in Kelvin."""
+        dev = self._device
+        if not dev or not dev.support_color_temp:
+            return None
+        return COLOR_TEMP_KELVIN_MAX
+
+    @property
     def supported_color_modes(self) -> set[ColorMode]:
         dev = self._device
         if not dev:
