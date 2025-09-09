@@ -162,22 +162,59 @@ class GoveeClient:
                 ct_min = None
                 ct_max = None
                 ct_step = 1
+
+                def _parse_range_dict(r):
+                    nonlocal ct_min, ct_max, ct_step
+                    if not isinstance(r, dict):
+                        return
+                    try:
+                        if r.get("min") is not None:
+                            ct_min = int(r.get("min"))
+                        if r.get("max") is not None:
+                            ct_max = int(r.get("max"))
+                        inc = (
+                            r.get("step")
+                            or r.get("inc")
+                            or r.get("increment")
+                            or r.get("precision")
+                        )
+                        if inc is not None:
+                            ct_step = int(inc)
+                    except Exception:
+                        # Ignore parsing errors; leave defaults
+                        pass
+
                 props = item.get("properties") or item.get("capabilities") or []
+
+                # Case A: list of capability dicts (e.g., instance=colorTemperatureK)
                 if isinstance(props, list):
                     for p in props:
-                        t = (p.get("type") or p.get("name") or "").lower()
-                        if "colortem" in t or "color_temp" in t or t == "ct":
-                            r = p.get("range") or p.get("value") or p.get("values") or {}
-                            try:
-                                if r.get("min") is not None:
-                                    ct_min = int(r.get("min"))
-                                if r.get("max") is not None:
-                                    ct_max = int(r.get("max"))
-                                inc = r.get("step") or r.get("inc") or r.get("increment")
-                                if inc is not None:
-                                    ct_step = int(inc)
-                            except Exception:
-                                pass
+                        typ = (p.get("type") or p.get("name") or "").lower()
+                        inst = (p.get("instance") or "").lower()
+                        # Match common representations of color temperature capability
+                        if (
+                            "colortem" in typ
+                            or "color_temp" in typ
+                            or ("color_setting" in typ and "colortemperature" in inst)
+                            or inst in {"colortemperaturek", "color_temperature_k", "colortemperatur"}
+                        ):
+                            if isinstance(p.get("parameters"), dict):
+                                _parse_range_dict(p["parameters"].get("range"))
+                            # Some variants put range at top-level under different keys
+                            _parse_range_dict(p.get("range") or p.get("value") or p.get("values"))
+
+                # Case B: dict of properties, e.g. {"colorTem": {"range": {...}}}
+                elif isinstance(props, dict):
+                    # Check a few likely keys
+                    for key in [
+                        "colorTem",
+                        "color_temperature_k",
+                        "colorTemperatureK",
+                        "colorTemperature",
+                        "ct",
+                    ]:
+                        if key in props and isinstance(props[key], dict):
+                            _parse_range_dict(props[key].get("range"))
 
                 support_cmds = item.get("supportCmds", [])
                 self._devices[dev_id] = GoveeDevice(
@@ -189,8 +226,9 @@ class GoveeClient:
                     support_cmds=support_cmds,
                     support_turn="turn" in support_cmds,
                     support_brightness="brightness" in support_cmds,
-                    support_color="color" in support_cmds,
-                    support_color_temp="colorTem" in support_cmds,
+                    support_color=("color" in support_cmds),
+                    # Consider color temp supported if API lists command OR we detected a CT range
+                    support_color_temp=("colorTem" in support_cmds) or (ct_min is not None or ct_max is not None),
                     color_temp_min=ct_min,
                     color_temp_max=ct_max,
                     color_temp_step=ct_step or 1,
