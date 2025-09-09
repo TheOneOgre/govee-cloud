@@ -155,6 +155,7 @@ class GoveeClient:
             timestamp = int(time.time())
             learning_infos = await self._storage.read()
 
+            _LOGGER.debug("Discovered %s devices from Govee API", len(data["data"]["devices"]))
             for item in data["data"]["devices"]:
                 dev_id = item["device"]
                 if dev_id in self._devices:
@@ -181,17 +182,18 @@ class GoveeClient:
                             except Exception:
                                 pass
 
+                support_cmds = item.get("supportCmds", [])
                 self._devices[dev_id] = GoveeDevice(
                     device=dev_id,
                     model=item["model"],
                     device_name=item["deviceName"],
                     controllable=item["controllable"],
                     retrievable=item["retrievable"],
-                    support_cmds=item["supportCmds"],
-                    support_turn="turn" in item["supportCmds"],
-                    support_brightness="brightness" in item["supportCmds"],
-                    support_color="color" in item["supportCmds"],
-                    support_color_temp="colorTem" in item["supportCmds"],
+                    support_cmds=support_cmds,
+                    support_turn="turn" in support_cmds,
+                    support_brightness="brightness" in support_cmds,
+                    support_color="color" in support_cmds,
+                    support_color_temp="colorTem" in support_cmds,
                     color_temp_min=ct_min,
                     color_temp_max=ct_max,
                     color_temp_step=ct_step or 1,
@@ -202,6 +204,19 @@ class GoveeClient:
                     learned_get_brightness_max=learned.get_brightness_max,
                     before_set_brightness_turn_on=learned.before_set_brightness_turn_on,
                     config_offline_is_off=learned.config_offline_is_off,
+                )
+
+                # Log capabilities to help debug missing devices/models
+                _LOGGER.debug(
+                    "Device %s (%s) controllable=%s retrievable=%s support=%s ct[min=%s max=%s step=%s]",
+                    dev_id,
+                    item.get("model"),
+                    item.get("controllable"),
+                    item.get("retrievable"),
+                    ",".join(support_cmds),
+                    ct_min,
+                    ct_max,
+                    ct_step,
                 )
 
             return list(self._devices.values()), None

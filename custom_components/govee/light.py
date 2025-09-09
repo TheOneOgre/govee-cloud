@@ -83,6 +83,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     # Register light entities with fresh data
     entities = [GoveeLightEntity(hub, entry.title, coordinator, dev) for dev in devices]
+    _LOGGER.debug("Registering %s Govee light entities", len(entities))
     async_add_entities(entities, update_before_add=True)
 
 
