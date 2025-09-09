@@ -30,6 +30,8 @@ class GoveeDevice:
     color_temp_min: Optional[int] = None
     color_temp_max: Optional[int] = None
     color_temp_step: int = 1
+    # Some models expect color temperature as 0-100 percent instead of Kelvin
+    color_temp_send_percent: Optional[bool] = None
     timestamp: int = 0
     source: GoveeSource = GoveeSource.HISTORY
     error: Optional[str] = None
@@ -48,3 +50,5 @@ class GoveeLearnedInfo:
     get_brightness_max: Optional[int] = None
     before_set_brightness_turn_on: bool = False
     config_offline_is_off: bool = False
+    # Persist whether this device expects CT as percent (0-100)
+    color_temp_send_percent: Optional[bool] = None

@@ -248,6 +248,7 @@ class GoveeClient:
                     learned_get_brightness_max=learned.get_brightness_max,
                     before_set_brightness_turn_on=learned.before_set_brightness_turn_on,
                     config_offline_is_off=learned.config_offline_is_off,
+                    color_temp_send_percent=learned.color_temp_send_percent,
                 )
 
                 # Log capabilities to help debug missing devices/models
@@ -296,6 +297,8 @@ class GoveeClient:
             "cmd": {"name": command, "value": value},
         }
 
+        _LOGGER.debug("Sending control → %s %s: %s", device.device, command, value)
+
         # Per-device throttle to avoid overwhelming API during rapid UI changes
         now = time.monotonic()
         if now < device.lock_set_until:
@@ -317,8 +320,10 @@ class GoveeClient:
 
             result = await resp.json()
             if result.get("message") == "Success":
+                _LOGGER.debug("Control success ← %s %s", device.device, command)
                 device.lock_set_until = time.monotonic() + 0.8
                 return True, None
+            _LOGGER.debug("Control failure ← %s %s: %s", device.device, command, result)
             return False, None
 
 
@@ -353,7 +358,63 @@ class GoveeClient:
             off = kelvin - vmin
             kelvin = vmin + round(off / step) * step
             kelvin = max(vmin, min(vmax, int(kelvin)))
-        return await self._debounced_control(dev or device, "colorTem", kelvin)
+        _LOGGER.debug(
+            "set_color_temp(%s) request=%sK → send=%sK (range %s-%s step %s, mode=%s)",
+            getattr(dev, "device", device), value, kelvin, vmin, vmax, step,
+            "percent" if getattr(dev, "color_temp_send_percent", False) else "kelvin",
+        )
+
+        # If device is known to expect percent, map K→% and send
+        if dev and dev.color_temp_send_percent:
+            width = max(1, (vmax - vmin))
+            pct = int(round((kelvin - vmin) * 100 / width))
+            pct = max(1, min(100, pct))
+            return await self._debounced_control(dev, "colorTem", pct)
+
+        ok, err = await self._debounced_control(dev or device, "colorTem", kelvin)
+
+        # Heuristic fallback: some models interpret value as 0–100 percent and
+        # set midpoint (~5500K) when given Kelvin. Detect this once and learn.
+        if ok and dev and dev.color_temp_send_percent is None:
+            # Give device a brief moment and read back state
+            try:
+                await asyncio.sleep(0.4)
+                ok_state, _ = await self.get_device_state(dev.device)
+                if ok_state and dev.color_temp:
+                    mid = int(round((vmin + vmax) / 2))
+                    if dev.color_temp == mid and kelvin != mid:
+                        _LOGGER.warning(
+                            "Device %s appears to expect CT as percent; switching mapping.",
+                            dev.device,
+                        )
+                        dev.color_temp_send_percent = True
+                        # Persist learned info
+                        await self._persist_learning()
+                        # Re-send using percent mapping
+                        width = max(1, (vmax - vmin))
+                        pct = int(round((kelvin - vmin) * 100 / width))
+                        pct = max(1, min(100, pct))
+                        return await self._debounced_control(dev, "colorTem", pct)
+            except Exception:
+                pass
+
+        return ok, err
+
+    async def _persist_learning(self):
+        """Write learned info for devices to storage."""
+        try:
+            infos = {}
+            for dev_id, dev in self._devices.items():
+                infos[dev_id] = GoveeLearnedInfo(
+                    set_brightness_max=dev.learned_set_brightness_max,
+                    get_brightness_max=dev.learned_get_brightness_max,
+                    before_set_brightness_turn_on=dev.before_set_brightness_turn_on,
+                    config_offline_is_off=dev.config_offline_is_off,
+                    color_temp_send_percent=dev.color_temp_send_percent,
+                )
+            await self._storage.write(infos)
+        except Exception as ex:
+            _LOGGER.debug("Persist learning failed: %s", ex)
 
     async def set_color(self, device, rgb: Tuple[int, int, int]):
         # Defensive: only send if supported

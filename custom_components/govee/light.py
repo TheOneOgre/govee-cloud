@@ -268,7 +268,10 @@ class GoveeLightEntity(LightEntity):
                 off = color_temp - vmin
                 color_temp = vmin + int(round(off / step)) * step
                 color_temp = max(vmin, min(vmax, color_temp))
-
+            _LOGGER.debug(
+                "Turn_on CT → %s request=%sK clamped=%sK (range %s-%s step %s)",
+                dev.device, kwargs.get(ATTR_COLOR_TEMP_KELVIN) or kwargs.get("color_temp"), color_temp, vmin, vmax, step,
+            )
             ok, err = await self._hub.set_color_temp(dev, color_temp)
             last_ok, last_err = ok, err
             if ok:
