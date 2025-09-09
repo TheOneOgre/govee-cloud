@@ -112,10 +112,19 @@ class GoveeClient:
         return {"Govee-API-Key": self._api_key}
 
     async def _rate_limit_delay(self):
+        """If close to the limit, wait until the reset window before sending.
+
+        This avoids 429s and ensures commands actually apply on the device
+        instead of being treated as soft-success locally.
+        """
         if self._remaining <= self._rate_limit_on:
             reset_in = max(0, self._reset - int(time.time()))
-            _LOGGER.warning("Rate limit reached, skipping updates for %ss", reset_in)
-            return []
+            if reset_in > 0:
+                _LOGGER.warning("Rate limit near/exceeded, backing off for %ss", reset_in)
+                try:
+                    await asyncio.sleep(reset_in)
+                except asyncio.CancelledError:
+                    return
 
 
     def _track_rate_limit(self, response: aiohttp.ClientResponse):
@@ -299,9 +308,9 @@ class GoveeClient:
             if resp.status == 429:
                 retry = max(0, self._reset - int(time.time()))
                 _LOGGER.warning("Rate limited for %s: retry after %ss", device.device, retry)
-                # Soft success → let HA trust local state
-                device.lock_set_until = time.monotonic() + max(1.0, float(retry))
-                return True, f"Rate limit: assumed success, retry in {retry}s"
+                # Do not assume success; allow caller to keep actual state
+                device.lock_set_until = time.monotonic() + max(0.5, float(retry))
+                return False, f"Rate limit: retry in {retry}s"
 
             if resp.status != 200:
                 return False, f"API error {resp.status}: {await resp.text()}"

@@ -225,34 +225,37 @@ class GoveeLightEntity(LightEntity):
         if not dev:
             return
 
-        err = None
-        ok = False
+        # Decide which operations to perform from kwargs
+        want_color = ATTR_HS_COLOR in kwargs and dev.support_color
+        want_ct = (ATTR_COLOR_TEMP_KELVIN in kwargs or "color_temp" in kwargs) and dev.support_color_temp
+        want_brightness = ATTR_BRIGHTNESS in kwargs and dev.support_brightness
 
-        if ATTR_HS_COLOR in kwargs and dev.support_color:
+        # Ensure power on if any command other than plain turn on
+        if (want_color or want_ct or want_brightness) and not dev.power_state and getattr(dev, "support_turn", True):
+            ok_on, err_on = await self._hub.turn_on(dev)
+            if ok_on:
+                dev.power_state = True
+            else:
+                _LOGGER.debug("turn_on before command failed for %s: %s", dev.device, err_on)
+
+        last_ok = False
+        last_err = None
+
+        # If both color and color temp are present, prefer color and ignore CT
+        if want_color:
             hs_color = kwargs[ATTR_HS_COLOR]
             col = color.color_hs_to_RGB(hs_color[0], hs_color[1])
             ok, err = await self._hub.set_color(dev, col)
-            # Trust local update even if rate limited
-            if ok or (err and "Rate limit" in err):
+            last_ok, last_err = ok, err
+            if ok:
                 dev.color = col
-                # Clear color temp so color_mode reflects HS
                 dev.color_temp = 0
                 dev.power_state = True
-
-        elif ATTR_BRIGHTNESS in kwargs and dev.support_brightness:
-            ha_bright = kwargs[ATTR_BRIGHTNESS]  # 0-255 from HA
-            ok, err = await self._hub.set_brightness(dev, ha_bright)
-            if ok:
-                # store the HA-side brightness so the UI reflects it immediately
-                dev.brightness = ha_bright
-                dev.power_state = True
-
-        elif (ATTR_COLOR_TEMP_KELVIN in kwargs or "color_temp" in kwargs) and dev.support_color_temp:
+        elif want_ct:
             # Accept both Kelvin (preferred) and mireds (deprecated) from HA
             if ATTR_COLOR_TEMP_KELVIN in kwargs:
                 color_temp = int(kwargs[ATTR_COLOR_TEMP_KELVIN])
             else:
-                # convert mireds to Kelvin safely
                 mireds = max(1, int(kwargs["color_temp"]))
                 color_temp = int(round(1_000_000 / mireds))
 
@@ -267,22 +270,35 @@ class GoveeLightEntity(LightEntity):
                 color_temp = max(vmin, min(vmax, color_temp))
 
             ok, err = await self._hub.set_color_temp(dev, color_temp)
-            if ok or (err and "Rate limit" in err):
+            last_ok, last_err = ok, err
+            if ok:
                 dev.color_temp = color_temp
-                # Clear HS color so color_mode reflects COLOR_TEMP
                 dev.color = (0, 0, 0)
                 dev.power_state = True
 
-        else:
+        # Apply brightness after mode selection if requested
+        if want_brightness:
+            ha_bright = kwargs[ATTR_BRIGHTNESS]  # 0-255 from HA
+            ok, err = await self._hub.set_brightness(dev, ha_bright)
+            # Track the result but don't override an earlier failure if this succeeds
+            if ok:
+                dev.brightness = ha_bright
+                dev.power_state = True
+            last_ok = last_ok or ok
+            if err:
+                last_err = err
+
+        # If no specific attribute was requested, this is a plain turn on
+        if not (want_color or want_ct or want_brightness):
             ok, err = await self._hub.turn_on(dev)
-            if ok or (err and "Rate limit" in err):
+            last_ok, last_err = ok, err
+            if ok:
                 dev.power_state = True
 
-        # Always push local state if we considered it valid
-        if ok or (err and "Rate limit" in err):
+        if last_ok:
             self.async_write_ha_state()
-        else:
-            _LOGGER.warning("async_turn_on failed for %s: %s", dev.device, err)
+        elif last_err:
+            _LOGGER.warning("async_turn_on failed for %s: %s", dev.device, last_err)
 
 
 
