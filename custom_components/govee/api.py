@@ -341,7 +341,12 @@ class GoveeClient:
                 if p.get("powerState") == "off":
                     dev.power_state = False
                 if "brightness" in p:
-                    dev.brightness = p["brightness"]
+                    # Govee API reports 0–100; HA expects 0–255
+                    try:
+                        gv = int(p["brightness"])
+                    except Exception:
+                        gv = 0
+                    dev.brightness = max(0, min(255, int(round(gv / 100 * 255))))
                 if "color" in p:
                     c = p["color"]
                     dev.color = (c["r"], c["g"], c["b"])
