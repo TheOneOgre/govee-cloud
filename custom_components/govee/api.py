@@ -229,6 +229,7 @@ class GoveeClient:
             learning_infos = await self._storage.read()
 
             _LOGGER.debug("Discovered %s devices from Govee API", len(data["data"]["devices"]))
+            percent_models = {"H6121", "H6076"}
             for item in data["data"]["devices"]:
                 dev_id = item["device"]
                 if dev_id in self._devices:
@@ -315,7 +316,11 @@ class GoveeClient:
                     learned_get_brightness_max=learned.get_brightness_max,
                     before_set_brightness_turn_on=learned.before_set_brightness_turn_on,
                     config_offline_is_off=learned.config_offline_is_off,
-                    color_temp_send_percent=learned.color_temp_send_percent,
+                    color_temp_send_percent=(
+                        learned.color_temp_send_percent
+                        if learned.color_temp_send_percent is not None
+                        else (item.get("model") in percent_models)
+                    ),
                 )
 
                 # Log capabilities to help debug missing devices/models
@@ -527,7 +532,24 @@ class GoveeClient:
                     c = p["color"]
                     dev.color = (c["r"], c["g"], c["b"])
                 if "colorTemInKelvin" in p:
-                    dev.color_temp = p["colorTemInKelvin"]
+                    dev.color_temp = int(p["colorTemInKelvin"]) or 0
+                elif "colorTemperatureK" in p:
+                    # Some schemas might return this key
+                    try:
+                        dev.color_temp = int(p["colorTemperatureK"]) or 0
+                    except Exception:
+                        pass
+                elif "colorTem" in p:
+                    # Some devices report CT as 0–100 percent; map to Kelvin
+                    try:
+                        pct = int(p["colorTem"])  # 0–100
+                        vmin = dev.color_temp_min or 2700
+                        vmax = dev.color_temp_max or 9000
+                        width = max(1, (vmax - vmin))
+                        pct = max(0, min(100, pct))
+                        dev.color_temp = int(round(vmin + (pct * width / 100)))
+                    except Exception:
+                        pass
             dev.online = True
 
             return True, None

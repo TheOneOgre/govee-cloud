@@ -111,12 +111,17 @@ class GoveeDataUpdateCoordinator(DataUpdateCoordinator):
         return self._config_entry.options.get(CONF_OFFLINE_IS_OFF, False)
 
     async def _async_update(self):
-        """Fetch data from Govee API."""
+        """Refresh live state without re-listing devices each time."""
         try:
-            devices, err = await self._hub.get_devices()
-            if err:
-                raise UpdateFailed(err)
-            return devices
+            # If we haven’t discovered devices yet, do it once
+            if not self._hub._devices:
+                devices, err = await self._hub.get_devices()
+                if err:
+                    raise UpdateFailed(err)
+            # Refresh state for known devices (respects per-device limit)
+            for dev_id in list(self._hub._devices.keys()):
+                await self._hub.get_device_state(dev_id)
+            return list(self._hub._devices.values())
         except Exception as ex:
             raise UpdateFailed(f"Exception on getting states: {ex}") from ex
 
