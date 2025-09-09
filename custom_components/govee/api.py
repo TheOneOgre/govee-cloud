@@ -247,6 +247,11 @@ class GoveeClient:
             "cmd": {"name": command, "value": value},
         }
 
+        # Per-device throttle to avoid overwhelming API during rapid UI changes
+        now = time.monotonic()
+        if now < device.lock_set_until:
+            await asyncio.sleep(device.lock_set_until - now)
+
         await self._rate_limit_delay()
         async with self._session.put(_API_CONTROL, headers=self._headers(), json=payload) as resp:
             self._track_rate_limit(resp)
