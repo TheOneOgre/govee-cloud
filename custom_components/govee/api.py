@@ -74,6 +74,15 @@ class GoveeClient:
         # Debounce/coalescing for rapid UI updates (per device, per command)
         self._coalesce: Dict[Tuple[str, str], _Coalescer] = {}
 
+        # Per-device minute rate limits (token buckets)
+        # Govee docs: DeviceControl 10/min per device; DeviceState 10/min per device
+        self._ctrl_bucket: Dict[str, Tuple[float, float]] = {}  # device_id -> (tokens, last_refill)
+        self._state_bucket: Dict[str, Tuple[float, float]] = {}
+
+        # Token bucket config
+        self._bucket_capacity = 10
+        self._bucket_refill_per_sec = self._bucket_capacity / 60.0
+
 
     @classmethod
     async def create(cls, api_key: str, storage, hass=None):
@@ -128,13 +137,67 @@ class GoveeClient:
 
 
     def _track_rate_limit(self, response: aiohttp.ClientResponse):
-        if "Rate-Limit-Total" in response.headers:
+        # Support both legacy and documented header variants
+        total = (
+            response.headers.get("Rate-Limit-Total")
+            or response.headers.get("API-RateLimit-Limit")
+        )
+        remaining = (
+            response.headers.get("Rate-Limit-Remaining")
+            or response.headers.get("API-RateLimit-Remaining")
+        )
+        reset = (
+            response.headers.get("Rate-Limit-Reset")
+            or response.headers.get("API-RateLimit-Reset")
+        )
+        try:
+            if total is not None:
+                self._limit = int(total)
+            if remaining is not None:
+                self._remaining = int(remaining)
+            if reset is not None:
+                # Reset header is epoch seconds per docs
+                self._reset = int(reset)
+        except Exception:
+            self._remaining -= 1
+
+    def _bucket_take(self, buckets: Dict[str, Tuple[float, float]], dev_id: str, *, tokens: float = 1.0) -> float:
+        """Try to take tokens; return wait time (0 if granted)."""
+        now = time.monotonic()
+        tok, last = buckets.get(dev_id, (float(self._bucket_capacity), now))
+        # Refill based on elapsed time
+        elapsed = max(0.0, now - last)
+        tok = min(float(self._bucket_capacity), tok + elapsed * self._bucket_refill_per_sec)
+        if tok >= tokens:
+            tok -= tokens
+            buckets[dev_id] = (tok, now)
+            return 0.0
+        # Need to wait for missing tokens
+        need = tokens - tok
+        wait = need / self._bucket_refill_per_sec
+        buckets[dev_id] = (tok, now)
+        return max(0.0, wait)
+
+    async def _wait_control_slot(self, dev_id: str):
+        while True:
+            wait = self._bucket_take(self._ctrl_bucket, dev_id, tokens=1.0)
+            if wait <= 0.0:
+                return
             try:
-                self._limit = int(response.headers["Rate-Limit-Total"])
-                self._remaining = int(response.headers["Rate-Limit-Remaining"])
-                self._reset = int(response.headers["Rate-Limit-Reset"])
-            except Exception:
-                self._remaining -= 1
+                await asyncio.sleep(wait)
+            except asyncio.CancelledError:
+                # Allow coalescer to cancel pending waits
+                raise
+
+    async def _wait_state_slot(self, dev_id: str):
+        while True:
+            wait = self._bucket_take(self._state_bucket, dev_id, tokens=1.0)
+            if wait <= 0.0:
+                return
+            try:
+                await asyncio.sleep(wait)
+            except asyncio.CancelledError:
+                raise
 
     async def _debounced_control(self, device: Union[str, GoveeDevice], command: str, value: Any, *, delay: float = 0.25) -> Tuple[bool, str | None]:
         """Coalesce rapid updates per (device, command) with a small delay."""
@@ -144,7 +207,11 @@ class GoveeClient:
         if co is None:
             co = _Coalescer(delay)
             self._coalesce[key] = co
-        fut = co.schedule(value, lambda v: self._control(device, command, v))
+        async def _send_latest(v):
+            # Enforce per-device control rate limit without queuing; coalescer cancels if newer arrives
+            await self._wait_control_slot(dev_id)
+            return await self._control(device, command, v)
+        fut = co.schedule(value, _send_latest)
         ok, err = await fut
         return ok, err
 
@@ -375,26 +442,25 @@ class GoveeClient:
 
         # Heuristic fallback: some models interpret value as 0–100 percent and
         # set midpoint (~5500K) when given Kelvin. Detect this once and learn.
-        if ok and dev and dev.color_temp_send_percent is None:
-            # Give device a brief moment and read back state
+        if dev and dev.color_temp_send_percent is not True:
             try:
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.45)
                 ok_state, _ = await self.get_device_state(dev.device)
                 if ok_state and dev.color_temp:
                     mid = int(round((vmin + vmax) / 2))
                     if dev.color_temp == mid and kelvin != mid:
                         _LOGGER.warning(
-                            "Device %s appears to expect CT as percent; switching mapping.",
-                            dev.device,
+                            "Device %s CT landed at midpoint (%sK) after %s → switching to percent mode.",
+                            dev.device, mid, kelvin,
                         )
                         dev.color_temp_send_percent = True
-                        # Persist learned info
                         await self._persist_learning()
-                        # Re-send using percent mapping
+                        # Re-send using percent mapping now that we learned
                         width = max(1, (vmax - vmin))
                         pct = int(round((kelvin - vmin) * 100 / width))
                         pct = max(1, min(100, pct))
-                        return await self._debounced_control(dev, "colorTem", pct)
+                        ok2, err2 = await self._debounced_control(dev, "colorTem", pct)
+                        return ok2, err2
             except Exception:
                 pass
 
@@ -429,6 +495,8 @@ class GoveeClient:
     async def get_device_state(self, device_id: str) -> Tuple[bool, str | None]:
         """Fetch current state of a device via API."""
         payload = {"device": device_id, "model": self._devices[device_id].model}
+        # Respect per-device state rate limit (10/min)
+        await self._wait_state_slot(device_id)
         await self._rate_limit_delay()
         async with self._session.get(f"{_API_BASE}/devices/state", headers=self._headers(), params=payload) as resp:
             self._track_rate_limit(resp)
