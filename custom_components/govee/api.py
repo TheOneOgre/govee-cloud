@@ -138,11 +138,6 @@ class GoveeClient:
         return ok, err
 
     async def get_devices(self) -> Tuple[List[GoveeDevice], str | None]:
-        # Per-device throttle to avoid overwhelming API during rapid UI changes
-        now = time.monotonic()
-        if now < device.lock_set_until:
-            await asyncio.sleep(device.lock_set_until - now)
-
         await self._rate_limit_delay()
         async with self._session.get(_API_DEVICES, headers=self._headers()) as resp:
             self._track_rate_limit(resp)
