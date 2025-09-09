@@ -39,17 +39,19 @@ class _Coalescer:
         async def runner():
             try:
                 await asyncio.sleep(self.delay)
+                # Capture current future to avoid race with reschedules
+                local_future = self._future
                 ok, err = await send_func(self._value)
-                if not self._future.done():
-                    self._future.set_result((ok, err))
+                if local_future is not None and not local_future.done():
+                    local_future.set_result((ok, err))
             except asyncio.CancelledError:
                 return
             except Exception as ex:
-                if not self._future.done():
-                    self._future.set_result((False, f"Exception: {ex}"))
+                local_future = getattr(self, "_future", None)
+                if local_future is not None and not local_future.done():
+                    local_future.set_result((False, f"Exception: {ex}"))
             finally:
                 self._task = None
-                self._future = None
 
         self._task = asyncio.create_task(runner())
         return self._future

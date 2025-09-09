@@ -10,7 +10,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
-    ATTR_COLOR_TEMP,
     ATTR_COLOR_TEMP_KELVIN,
     ATTR_HS_COLOR,
     ColorMode,
@@ -248,13 +247,13 @@ class GoveeLightEntity(LightEntity):
                 dev.brightness = ha_bright
                 dev.power_state = True
 
-        elif (ATTR_COLOR_TEMP_KELVIN in kwargs or ATTR_COLOR_TEMP in kwargs) and dev.support_color_temp:
+        elif (ATTR_COLOR_TEMP_KELVIN in kwargs or "color_temp" in kwargs) and dev.support_color_temp:
             # Accept both Kelvin (preferred) and mireds (deprecated) from HA
             if ATTR_COLOR_TEMP_KELVIN in kwargs:
                 color_temp = int(kwargs[ATTR_COLOR_TEMP_KELVIN])
             else:
                 # convert mireds to Kelvin safely
-                mireds = max(1, int(kwargs[ATTR_COLOR_TEMP]))
+                mireds = max(1, int(kwargs["color_temp"]))
                 color_temp = int(round(1_000_000 / mireds))
 
             # Clamp and round to device capabilities if known
