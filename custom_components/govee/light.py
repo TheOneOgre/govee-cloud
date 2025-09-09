@@ -10,6 +10,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
+    ATTR_COLOR_TEMP,
     ATTR_COLOR_TEMP_KELVIN,
     ATTR_HS_COLOR,
     ColorMode,
@@ -173,7 +174,8 @@ class GoveeLightEntity(LightEntity):
         dev = self._device
         if not dev or not dev.support_color_temp:
             return None
-        return COLOR_TEMP_KELVIN_MIN
+        # Prefer per-device limits if known
+        return dev.color_temp_min or COLOR_TEMP_KELVIN_MIN
 
     @property
     def max_color_temp_kelvin(self) -> int | None:
@@ -181,7 +183,7 @@ class GoveeLightEntity(LightEntity):
         dev = self._device
         if not dev or not dev.support_color_temp:
             return None
-        return COLOR_TEMP_KELVIN_MAX
+        return dev.color_temp_max or COLOR_TEMP_KELVIN_MAX
 
     @property
     def supported_color_modes(self) -> set[ColorMode]:
@@ -233,23 +235,42 @@ class GoveeLightEntity(LightEntity):
             # Trust local update even if rate limited
             if ok or (err and "Rate limit" in err):
                 dev.color = col
+                # Clear color temp so color_mode reflects HS
+                dev.color_temp = 0
                 dev.power_state = True
 
         elif ATTR_BRIGHTNESS in kwargs and dev.support_brightness:
-            ha_bright = kwargs[ATTR_BRIGHTNESS]  # 0–255 from HA
+            ha_bright = kwargs[ATTR_BRIGHTNESS]  # 0-255 from HA
             ok, err = await self._hub.set_brightness(dev, ha_bright)
             if ok:
                 # store the HA-side brightness so the UI reflects it immediately
                 dev.brightness = ha_bright
                 dev.power_state = True
 
+        elif (ATTR_COLOR_TEMP_KELVIN in kwargs or ATTR_COLOR_TEMP in kwargs) and dev.support_color_temp:
+            # Accept both Kelvin (preferred) and mireds (deprecated) from HA
+            if ATTR_COLOR_TEMP_KELVIN in kwargs:
+                color_temp = int(kwargs[ATTR_COLOR_TEMP_KELVIN])
+            else:
+                # convert mireds to Kelvin safely
+                mireds = max(1, int(kwargs[ATTR_COLOR_TEMP]))
+                color_temp = int(round(1_000_000 / mireds))
 
-        elif ATTR_COLOR_TEMP_KELVIN in kwargs and dev.support_color_temp:
-            color_temp = kwargs[ATTR_COLOR_TEMP_KELVIN]
-            color_temp = max(COLOR_TEMP_KELVIN_MIN, min(COLOR_TEMP_KELVIN_MAX, color_temp))
+            # Clamp and round to device capabilities if known
+            vmin = dev.color_temp_min or COLOR_TEMP_KELVIN_MIN
+            vmax = dev.color_temp_max or COLOR_TEMP_KELVIN_MAX
+            step = dev.color_temp_step or 1
+            color_temp = max(vmin, min(vmax, color_temp))
+            if step and step > 1:
+                off = color_temp - vmin
+                color_temp = vmin + int(round(off / step)) * step
+                color_temp = max(vmin, min(vmax, color_temp))
+
             ok, err = await self._hub.set_color_temp(dev, color_temp)
             if ok or (err and "Rate limit" in err):
                 dev.color_temp = color_temp
+                # Clear HS color so color_mode reflects COLOR_TEMP
+                dev.color = (0, 0, 0)
                 dev.power_state = True
 
         else:

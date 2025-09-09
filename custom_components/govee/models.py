@@ -26,6 +26,10 @@ class GoveeDevice:
     brightness: int = 0
     color: Tuple[int, int, int] = (0, 0, 0)
     color_temp: int = 0
+    # Per-device color temperature capabilities (Kelvin)
+    color_temp_min: Optional[int] = None
+    color_temp_max: Optional[int] = None
+    color_temp_step: int = 1
     timestamp: int = 0
     source: GoveeSource = GoveeSource.HISTORY
     error: Optional[str] = None
@@ -33,8 +37,9 @@ class GoveeDevice:
     learned_get_brightness_max: Optional[int] = None
     before_set_brightness_turn_on: bool = False
     config_offline_is_off: bool = False
-    lock_set_until: int = 0
-    lock_get_until: int = 0
+    # Lightweight throttle windows (monotonic seconds)
+    lock_set_until: float = 0.0
+    lock_get_until: float = 0.0
 
 
 @dataclass
