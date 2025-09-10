@@ -226,10 +226,15 @@ class GoveeLightEntity(LightEntity):
         if not dev:
             return ColorMode.ONOFF
 
-        # Prioritize based on what’s actually supported
+        # Prioritize based on what’s actually supported and active
         if dev.support_color and dev.color and any(dev.color):
             return ColorMode.HS
         if dev.support_color_temp and dev.color_temp > 0:
+            return ColorMode.COLOR_TEMP
+        # No explicit color/CT active; choose a supported mode that is allowed
+        if dev.support_color:
+            return ColorMode.HS
+        if dev.support_color_temp:
             return ColorMode.COLOR_TEMP
         if dev.support_brightness:
             return ColorMode.BRIGHTNESS

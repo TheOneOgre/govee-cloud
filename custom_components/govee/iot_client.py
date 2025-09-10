@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import base64
 import json
 import logging
@@ -88,6 +89,8 @@ class IoTState:
     hub: Any
     mqtt: MqttClient | None = None
     stop_event: asyncio.Event | None = None
+    certfile_path: str | None = None
+    keyfile_path: str | None = None
 
 
 class GoveeIoTClient:
@@ -123,22 +126,62 @@ class GoveeIoTClient:
             _LOGGER.warning("Govee IoT login failed: %s", ex)
             return
 
-        # Prepare SSL context with extracted certs
-        ctx = ssl.create_default_context()
-        ctx.load_verify_locations(cafile=certifi.where())
-        with tempfile.NamedTemporaryFile("wb", delete=False) as kf, tempfile.NamedTemporaryFile(
-            "wb", delete=False
-        ) as cf:
-            kf.write(key_pem)
-            cf.write(cert_pem)
-            kf.flush()
-            cf.flush()
-            ctx.load_cert_chain(certfile=cf.name, keyfile=kf.name)
+        # Prepare SSL context with extracted certs in executor (avoid blocking loop)
+        loop = asyncio.get_running_loop()
+
+        def _build_ctx() -> tuple[ssl.SSLContext, str, str]:
+            ctx = ssl.create_default_context()
+            ctx.load_verify_locations(cafile=certifi.where())
+            kf = tempfile.NamedTemporaryFile("wb", delete=False)
+            cf = tempfile.NamedTemporaryFile("wb", delete=False)
+            try:
+                kf.write(key_pem)
+                cf.write(cert_pem)
+                kf.flush()
+                cf.flush()
+                ctx.load_cert_chain(certfile=cf.name, keyfile=kf.name)
+            except Exception:
+                # Clean up on failure
+                try:
+                    kf.close()
+                    os.unlink(kf.name)
+                except Exception:
+                    pass
+                try:
+                    cf.close()
+                    os.unlink(cf.name)
+                except Exception:
+                    pass
+                raise
+            finally:
+                # Close handles but keep files for the life of the client
+                try:
+                    kf.close()
+                except Exception:
+                    pass
+                try:
+                    cf.close()
+                except Exception:
+                    pass
+            return ctx, cf.name, kf.name
+
+        try:
+            ctx, certfile_path, keyfile_path = await loop.run_in_executor(None, _build_ctx)
+        except Exception as ex:
+            _LOGGER.warning("Govee IoT SSL context failed: %s", ex)
+            return
 
         client = MqttClient(client_id=f"AP/{acct.get('accountId')}/{uuid.uuid4().hex}")
         client.tls_set_context(ctx)
 
-        iot_state = IoTState(hass=self._hass, entry_id=self._entry.entry_id, hub=self._hub, mqtt=client)
+        iot_state = IoTState(
+            hass=self._hass,
+            entry_id=self._entry.entry_id,
+            hub=self._hub,
+            mqtt=client,
+            certfile_path=certfile_path,
+            keyfile_path=keyfile_path,
+        )
         self._iot = iot_state
 
         def on_message(_client, _userdata, msg):
@@ -236,3 +279,11 @@ class GoveeIoTClient:
                 self._iot.mqtt.disconnect()
             except Exception:
                 pass
+        # Clean up temporary cert/key files
+        if self._iot:
+            for p in (self._iot.certfile_path, self._iot.keyfile_path):
+                if p:
+                    try:
+                        os.unlink(p)
+                    except Exception:
+                        pass
