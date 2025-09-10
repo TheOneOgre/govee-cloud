@@ -79,6 +79,9 @@ class GoveeClient:
         self._bucket_capacity = 10.0
         self._bucket_refill_per_sec = self._bucket_capacity / 60.0
 
+        # Lightweight duplicate suppression: last value per (device, command)
+        self._last_sent: Dict[Tuple[str, str], Tuple[Any, float]] = {}
+
 
     @classmethod
     async def create(cls, api_key: str, storage, hass=None):
@@ -159,6 +162,8 @@ class GoveeClient:
         async def _send_latest(v):
             # Enforce per-device 10/min budget without queuing outdated values.
             # Coalescer will cancel this task if a newer value arrives while waiting.
+            retries = 0
+            max_retries = 2
             while True:
                 wait = self._bucket_take(dev_id, 1.0)
                 if wait <= 0:
@@ -167,7 +172,33 @@ class GoveeClient:
                     await asyncio.sleep(wait)
                 except asyncio.CancelledError:
                     raise
-            return await self._control(device, command, v)
+            # Drop exact duplicates sent within 2 seconds
+            now = time.monotonic()
+            last = self._last_sent.get(key)
+            if last is not None:
+                last_val, ts = last
+                if last_val == v and (now - ts) < 2.0:
+                    return True, None
+            ok, err = await self._control(device, command, v)
+            if ok:
+                self._last_sent[key] = (v, now)
+                return ok, err
+            # Handle API 429 by retrying once or twice; if newer value arrives, this task will be cancelled
+            if (not ok) and err and err.startswith("Rate limit:") and retries < max_retries:
+                # Fallback to a safe wait (6s) if header-derived reset is 0
+                sleep_s = 6.0
+                try:
+                    part = err.split("in ")[-1].rstrip("s")
+                    sleep_s = max(1.0, float(part))
+                except Exception:
+                    pass
+                try:
+                    await asyncio.sleep(min(60.0, sleep_s))
+                except asyncio.CancelledError:
+                    raise
+                retries += 1
+                continue
+            return ok, err
 
         fut = co.schedule(value, _send_latest)
         ok, err = await fut
