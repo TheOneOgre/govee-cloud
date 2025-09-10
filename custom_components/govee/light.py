@@ -2,13 +2,13 @@
 import logging
 from datetime import datetime, timedelta
 
-from homeassistant.util import color
-from homeassistant.util.color import value_to_brightness
-from homeassistant.const import CONF_DELAY
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import color # type: ignore
+from homeassistant.util.color import value_to_brightness # type: ignore
+from homeassistant.const import CONF_DELAY # type: ignore
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed # type: ignore
 
 
-from homeassistant.components.light import (
+from homeassistant.components.light import ( # type: ignore
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
     ATTR_HS_COLOR,
