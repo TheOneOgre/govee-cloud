@@ -42,7 +42,11 @@ class _Coalescer:
                 await asyncio.sleep(self.delay)
                 # Capture current future to avoid race with reschedules
                 local_future = self._future
-                ok, err = await send_func(self._value)
+                result = await send_func(self._value)
+                if isinstance(result, tuple) and len(result) == 2:
+                    ok, err = result
+                else:
+                    ok, err = False, "Exception: invalid control handler result"
                 if local_future is not None and not local_future.done():
                     local_future.set_result((ok, err))
             except asyncio.CancelledError:

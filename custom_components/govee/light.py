@@ -264,7 +264,8 @@ class GoveeLightEntity(LightEntity):
             else:
                 ok, err = await self._hub.set_color(dev, col)
                 last_ok, last_err = ok, err
-                if ok:
+                if ok or (err and isinstance(err, str) and err.startswith("Rate limit")):
+                    # Optimistically update on rate limit; reconciled via post-control poll
                     dev.color = col
                     dev.color_temp = 0
                     dev.power_state = True
@@ -296,7 +297,7 @@ class GoveeLightEntity(LightEntity):
             else:
                 ok, err = await self._hub.set_color_temp(dev, color_temp)
                 last_ok, last_err = ok, err
-                if ok:
+                if ok or (err and isinstance(err, str) and err.startswith("Rate limit")):
                     dev.color_temp = color_temp
                     dev.color = (0, 0, 0)
                     dev.power_state = True
@@ -309,9 +310,9 @@ class GoveeLightEntity(LightEntity):
                 ok, err = True, None
             else:
                 ok, err = await self._hub.set_brightness(dev, ha_bright)
-                if ok:
-                    dev.brightness = ha_bright
-                    dev.power_state = True
+            if ok or (err and isinstance(err, str) and err.startswith("Rate limit")):
+                dev.brightness = ha_bright
+                dev.power_state = True
             # Track the result but don't override an earlier failure if this succeeds
             last_ok = last_ok or ok
             if err:
