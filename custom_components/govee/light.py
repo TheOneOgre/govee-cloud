@@ -174,8 +174,13 @@ class GoveeLightEntity(LightEntity):
         dev = self._device
         if not dev or not dev.support_color_temp:
             return None
-        # Prefer per-device limits if known
-        return dev.color_temp_min or COLOR_TEMP_KELVIN_MIN
+        # Prefer per-device limits if known, but guard against invalid ranges
+        min_k = dev.color_temp_min or COLOR_TEMP_KELVIN_MIN
+        max_k = dev.color_temp_max or COLOR_TEMP_KELVIN_MAX
+        if isinstance(min_k, int) and isinstance(max_k, int) and min_k < max_k:
+            return min_k
+        # Fallback to defaults when range is invalid or collapsed
+        return COLOR_TEMP_KELVIN_MIN
 
     @property
     def max_color_temp_kelvin(self) -> int | None:
@@ -183,7 +188,11 @@ class GoveeLightEntity(LightEntity):
         dev = self._device
         if not dev or not dev.support_color_temp:
             return None
-        return dev.color_temp_max or COLOR_TEMP_KELVIN_MAX
+        min_k = dev.color_temp_min or COLOR_TEMP_KELVIN_MIN
+        max_k = dev.color_temp_max or COLOR_TEMP_KELVIN_MAX
+        if isinstance(min_k, int) and isinstance(max_k, int) and min_k < max_k:
+            return max_k
+        return COLOR_TEMP_KELVIN_MAX
 
     @property
     def supported_color_modes(self) -> set[ColorMode]:
