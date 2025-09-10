@@ -9,6 +9,8 @@ from aiohttp import ClientSession
 from typing import Any, Dict, List, Tuple, Union
 
 from .models import GoveeDevice, GoveeSource, GoveeLearnedInfo
+from .const import CONF_PLATFORM_APP_ENABLED, CONF_IOT_EMAIL, CONF_IOT_PASSWORD
+from .platform_app import PlatformAppClient
 from .quirks import resolve_quirk
 
 _LOGGER = logging.getLogger(__name__)
@@ -92,10 +94,12 @@ class GoveeClient:
         self._ctrl_locks: Dict[str, asyncio.Lock] = {}
         # Post-control reconciliation throttle
         self._last_post_poll: Dict[str, float] = {}
+        # Optional Platform App control client (experimental)
+        self._platform_app: PlatformAppClient | None = None
 
 
     @classmethod
-    async def create(cls, api_key: str, storage, hass=None):
+    async def create(cls, api_key: str, storage, hass=None, config_entry=None):
         """Async-safe constructor."""
         self = cls(api_key, storage)
 
@@ -108,6 +112,15 @@ class GoveeClient:
             self._ssl_context = ssl.create_default_context(cafile=certifi.where())
 
         await self._init_session()
+        # Initialize Platform App client if configured
+        try:
+            if config_entry and config_entry.options.get(CONF_PLATFORM_APP_ENABLED, False):
+                email = config_entry.options.get(CONF_IOT_EMAIL)
+                password = config_entry.options.get(CONF_IOT_PASSWORD)
+                if email and password:
+                    self._platform_app = PlatformAppClient(email, password)
+        except Exception as ex:
+            _LOGGER.warning("PlatformApp init failed: %s", ex)
         return self
 
     async def _init_session(self):
@@ -459,6 +472,24 @@ class GoveeClient:
             if now < device.lock_set_until and device.lock_set_until - now < 2.0:
                 await asyncio.sleep(device.lock_set_until - now)
 
+            # Experimental: Try Platform App control first if enabled
+            if self._platform_app:
+                try:
+                    if command == "turn":
+                        ok = await self._platform_app.control_turn(device.model, device.device, value == "on")
+                        return (True, None) if ok else (False, "PlatformApp turn failed")
+                    if command == "brightness":
+                        ok = await self._platform_app.control_brightness(device.model, device.device, int(value))
+                        return (True, None) if ok else (False, "PlatformApp brightness failed")
+                    if command == "color":
+                        ok = await self._platform_app.control_colorwc(device.model, device.device, r=value.get("r",0), g=value.get("g",0), b=value.get("b",0), kelvin=0)
+                        return (True, None) if ok else (False, "PlatformApp color failed")
+                    if command == "colorTem":
+                        ok = await self._platform_app.control_colorwc(device.model, device.device, r=0,g=0,b=0, kelvin=int(value))
+                        return (True, None) if ok else (False, "PlatformApp colorTem failed")
+                except Exception as ex:
+                    _LOGGER.debug("PlatformApp control error: %s", ex)
+
             await self._rate_limit_delay()
         async with self._session.put(_API_CONTROL, headers=self._headers(), json=payload) as resp:
             self._track_rate_limit(resp)
@@ -635,4 +666,3 @@ class GoveeClient:
                 return
 
         asyncio.create_task(runner())
-

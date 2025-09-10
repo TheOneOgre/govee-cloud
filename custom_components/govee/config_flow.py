@@ -15,6 +15,7 @@ from .const import (
     CONF_IOT_EMAIL,
     CONF_IOT_PASSWORD,
     CONF_IOT_PUSH_ENABLED,
+    CONF_PLATFORM_APP_ENABLED,
     DOMAIN,
 )
 
@@ -71,15 +72,15 @@ class GoveeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             if not errors:
                 return self.async_create_entry(title="Govee", data=user_input)
 
+        # Step 1: basic + toggles
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_API_KEY): cv.string,
                     vol.Optional(CONF_DELAY, default=10): cv.positive_int,
-                    vol.Optional(CONF_IOT_EMAIL, default=""): cv.string,
-                    vol.Optional(CONF_IOT_PASSWORD, default=""): cv.string,
                     vol.Optional(CONF_IOT_PUSH_ENABLED, default=True): cv.boolean,
+                    vol.Optional(CONF_PLATFORM_APP_ENABLED, default=False): cv.boolean,
                 }
             ),
             errors=errors,
@@ -149,17 +150,13 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_DISABLE_ATTRIBUTE_UPDATES,
                     default=self.config_entry.options.get(CONF_DISABLE_ATTRIBUTE_UPDATES, ""),
                 ): cv.string,
-                vol.Optional(
-                    CONF_IOT_EMAIL,
-                    default=self.config_entry.options.get(CONF_IOT_EMAIL, ""),
-                ): cv.string,
-                vol.Optional(
-                    CONF_IOT_PASSWORD,
-                    default=self.config_entry.options.get(CONF_IOT_PASSWORD, ""),
-                ): cv.string,
                 vol.Required(
                     CONF_IOT_PUSH_ENABLED,
                     default=self.config_entry.options.get(CONF_IOT_PUSH_ENABLED, False),
+                ): cv.boolean,
+                vol.Required(
+                    CONF_PLATFORM_APP_ENABLED,
+                    default=self.config_entry.options.get(CONF_PLATFORM_APP_ENABLED, False),
                 ): cv.boolean,
             }
         )
@@ -177,6 +174,19 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
                 )
             },
         )
+
+    async def async_step_iot(self, user_input=None):
+        errors = {}
+        if user_input is not None:
+            self.options.update(user_input)
+            return self.async_create_entry(title="Govee", data=self.options)
+        iot_schema = vol.Schema(
+            {
+                vol.Required(CONF_IOT_EMAIL, default=self.config_entry.options.get(CONF_IOT_EMAIL, "")): cv.string,
+                vol.Required(CONF_IOT_PASSWORD, default=self.config_entry.options.get(CONF_IOT_PASSWORD, "")): cv.string,
+            }
+        )
+        return self.async_show_form(step_id="iot", data_schema=iot_schema, errors=errors)
 
 
 

@@ -27,7 +27,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     api_key = entry.options.get(CONF_API_KEY, entry.data.get(CONF_API_KEY, ""))
 
     storage = GoveeLearningStorage(hass.config.config_dir, hass)
-    hub = await GoveeClient.create(api_key, storage, hass)
+    hub = await GoveeClient.create(api_key, storage, hass, config_entry=entry)
 
 
     # New style: per entry_id
