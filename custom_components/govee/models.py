@@ -30,6 +30,9 @@ class GoveeDevice:
     color_temp_min: Optional[int] = None
     color_temp_max: Optional[int] = None
     color_temp_step: int = 1
+    # Quirk/apparatus flags (for future LAN/IOT support)
+    lan_api_capable: bool = False
+    avoid_platform_api: bool = False
     # Learned overrides for CT range
     learned_color_temp_min: Optional[int] = None
     learned_color_temp_max: Optional[int] = None

@@ -9,6 +9,7 @@ from aiohttp import ClientSession
 from typing import Any, Dict, List, Tuple, Union
 
 from .models import GoveeDevice, GoveeSource, GoveeLearnedInfo
+from .quirks import resolve_quirk
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -296,9 +297,19 @@ class GoveeClient:
                             _parse_range_dict(props[key].get("range"))
 
                 support_cmds = item.get("supportCmds", [])
+                # Apply model-specific quirks if known
+                model = item.get("model")
+                quirk = resolve_quirk(model) if model else None
+                if quirk and quirk.color_temp_range:
+                    qmin, qmax = quirk.color_temp_range
+                    if ct_min is None:
+                        ct_min = int(qmin)
+                    if ct_max is None:
+                        ct_max = int(qmax)
+
                 self._devices[dev_id] = GoveeDevice(
                     device=dev_id,
-                    model=item["model"],
+                    model=model,
                     device_name=item["deviceName"],
                     controllable=item["controllable"],
                     retrievable=item["retrievable"],
@@ -311,6 +322,8 @@ class GoveeClient:
                     color_temp_min=ct_min,
                     color_temp_max=ct_max,
                     color_temp_step=ct_step or 1,
+                    lan_api_capable=bool(quirk and quirk.lan_api_capable),
+                    avoid_platform_api=bool(quirk and quirk.avoid_platform_api),
                     online=True,
                     timestamp=timestamp,
                     source=GoveeSource.API,
@@ -324,15 +337,17 @@ class GoveeClient:
 
                 # Log capabilities to help debug missing devices/models
                 _LOGGER.debug(
-                    "Device %s (%s) controllable=%s retrievable=%s support=%s ct[min=%s max=%s step=%s]",
+                    "Device %s (%s) controllable=%s retrievable=%s support=%s ct[min=%s max=%s step=%s] quirk[lan=%s avoid_platform=%s]",
                     dev_id,
-                    item.get("model"),
+                    model,
                     item.get("controllable"),
                     item.get("retrievable"),
                     ",".join(support_cmds),
                     ct_min,
                     ct_max,
                     ct_step,
+                    bool(quirk and quirk.lan_api_capable),
+                    bool(quirk and quirk.avoid_platform_api),
                 )
 
             return list(self._devices.values()), None
