@@ -604,6 +604,9 @@ class GoveeClient:
 
             props = data["data"]["properties"]
             dev = self._devices[device_id]
+            # Collect values first, then enforce exclusivity
+            new_color = None
+            new_ct = None
             for p in props:
                 # Some properties objects don’t have "online"
                 if "online" in p and p["online"] is False:
@@ -621,17 +624,15 @@ class GoveeClient:
                     dev.brightness = max(0, min(255, int(round(gv / 100 * 255))))
                 if "color" in p:
                     c = p["color"]
-                    # When device reports RGB, CT is inactive
-                    dev.color = (c.get("r", 0), c.get("g", 0), c.get("b", 0))
-                    dev.color_temp = 0
+                    new_color = (c.get("r", 0), c.get("g", 0), c.get("b", 0))
                 if "colorTemInKelvin" in p:
-                    dev.color_temp = int(p["colorTemInKelvin"]) or 0
-                    dev.color = (0, 0, 0)
-                elif "colorTemperatureK" in p:
-                    # Some schemas might return this key
                     try:
-                        dev.color_temp = int(p["colorTemperatureK"]) or 0
-                        dev.color = (0, 0, 0)
+                        new_ct = int(p["colorTemInKelvin"]) or 0
+                    except Exception:
+                        pass
+                elif "colorTemperatureK" in p:
+                    try:
+                        new_ct = int(p["colorTemperatureK"]) or 0
                     except Exception:
                         pass
                 elif "colorTem" in p:
@@ -642,10 +643,26 @@ class GoveeClient:
                         vmax = dev.color_temp_max or 9000
                         width = max(1, (vmax - vmin))
                         pct = max(0, min(100, pct))
-                        dev.color_temp = int(round(vmin + (pct * width / 100)))
-                        dev.color = (0, 0, 0)
+                        new_ct = int(round(vmin + (pct * width / 100)))
                     except Exception:
                         pass
+
+            # Enforce mutual exclusivity with preference for RGB if present
+            now_mono = time.monotonic()
+            if new_color and any(new_color):
+                # Avoid immediate flip to color if we just set CT locally
+                if now_mono < getattr(dev, "lock_set_until", 0.0) and getattr(dev, "color_temp", 0) > 0:
+                    pass
+                else:
+                    dev.color = (new_color[0], new_color[1], new_color[2])
+                    dev.color_temp = 0
+            elif new_ct and new_ct > 0:
+                # If we just set a color locally, avoid immediate flip to CT
+                if now_mono < getattr(dev, "lock_set_until", 0.0) and any(getattr(dev, "color", (0,0,0))):
+                    pass
+                else:
+                    dev.color_temp = new_ct
+                    dev.color = (0, 0, 0)
             dev.online = True
 
             return True, None

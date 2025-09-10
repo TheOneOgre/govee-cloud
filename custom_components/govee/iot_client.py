@@ -231,17 +231,35 @@ class GoveeIoTClient:
                     dev.brightness = max(0, min(255, int(round(gv / 100 * 255))))
                 except Exception:
                     pass
-            # color / CT mutual exclusivity
+            # Collect potential color/ct values first
+            new_color = None
+            new_ct = None
             if "color" in state and isinstance(state["color"], dict):
                 c = state["color"]
-                dev.color = (int(c.get("r", 0)), int(c.get("g", 0)), int(c.get("b", 0)))
-                dev.color_temp = 0
+                new_color = (int(c.get("r", 0)), int(c.get("g", 0)), int(c.get("b", 0)))
             if "colorTemInKelvin" in state:
                 try:
-                    dev.color_temp = int(state.get("colorTemInKelvin") or 0)
-                    dev.color = (0, 0, 0)
+                    new_ct = int(state.get("colorTemInKelvin") or 0)
                 except Exception:
+                    new_ct = None
+
+            # Apply with mutual exclusivity, preferring RGB when present
+            import time as _t
+            now_mono = _t.monotonic()
+            if new_color and any(new_color):
+                # Avoid immediate flip to color if we just set CT locally
+                if now_mono < getattr(dev, "lock_set_until", 0.0) and getattr(dev, "color_temp", 0) > 0:
                     pass
+                else:
+                    dev.color = new_color
+                    dev.color_temp = 0
+            elif new_ct and new_ct > 0:
+                # Avoid immediate flip to CT if we just set color locally
+                if now_mono < getattr(dev, "lock_set_until", 0.0) and any(getattr(dev, "color", (0,0,0))):
+                    pass  # ignore stale CT right after a local color change
+                else:
+                    dev.color_temp = new_ct
+                    dev.color = (0, 0, 0)
             # Push into coordinator if present
             entry_data = self._hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
             if entry_data and "coordinator" in entry_data:
