@@ -460,8 +460,8 @@ class GoveeClient:
                 await asyncio.sleep(device.lock_set_until - now)
 
             await self._rate_limit_delay()
-            async with self._session.put(_API_CONTROL, headers=self._headers(), json=payload) as resp:
-                self._track_rate_limit(resp)
+        async with self._session.put(_API_CONTROL, headers=self._headers(), json=payload) as resp:
+            self._track_rate_limit(resp)
 
             if resp.status == 429:
                 retry = max(0, self._reset - int(time.time()))
@@ -471,17 +471,18 @@ class GoveeClient:
                 return False, f"Rate limit: retry in {retry}s"
 
             if resp.status != 200:
-                return False, f"API error {resp.status}: {await resp.text()}"
+                text = await resp.text()
+                return False, f"API error {resp.status}: {text}"
 
-                result = await resp.json()
-                if result.get("message") == "Success":
-                    _LOGGER.debug("Control success ← %s %s", device.device, command)
-                    device.lock_set_until = time.monotonic() + 0.8
-                    # Schedule a reconciliatory state fetch shortly after
-                    self._schedule_post_control_poll(device.device)
-                    return True, None
-                _LOGGER.debug("Control failure ← %s %s: %s", device.device, command, result)
-                return False, None
+            result = await resp.json()
+            if result.get("message") == "Success":
+                _LOGGER.debug("Control success ← %s %s", device.device, command)
+                device.lock_set_until = time.monotonic() + 0.8
+                # Schedule a reconciliatory state fetch shortly after
+                self._schedule_post_control_poll(device.device)
+                return True, None
+            _LOGGER.debug("Control failure ← %s %s: %s", device.device, command, result)
+            return False, result.get("message")
 
 
 
