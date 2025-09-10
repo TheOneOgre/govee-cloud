@@ -71,8 +71,13 @@ class GoveeClient:
         self._reset = 0
         self._rate_limit_on = 5
 
-        # Debounce/coalescing for rapid UI updates (per device, per command)
+        # Debounce/coalesce rapid updates (per device, per command)
         self._coalesce: Dict[Tuple[str, str], _Coalescer] = {}
+
+        # Per-device control token bucket (10/min per device)
+        self._ctrl_bucket: Dict[str, Tuple[float, float]] = {}
+        self._bucket_capacity = 10.0
+        self._bucket_refill_per_sec = self._bucket_capacity / 60.0
 
 
     @classmethod
@@ -127,6 +132,21 @@ class GoveeClient:
             except Exception:
                 self._remaining -= 1
 
+    def _bucket_take(self, dev_id: str, tokens: float = 1.0) -> float:
+        """Control token bucket: returns wait seconds if not enough tokens."""
+        now = time.monotonic()
+        tokens_now, last = self._ctrl_bucket.get(dev_id, (self._bucket_capacity, now))
+        elapsed = max(0.0, now - last)
+        tokens_now = min(self._bucket_capacity, tokens_now + elapsed * self._bucket_refill_per_sec)
+        if tokens_now >= tokens:
+            tokens_now -= tokens
+            self._ctrl_bucket[dev_id] = (tokens_now, now)
+            return 0.0
+        needed = tokens - tokens_now
+        wait = needed / self._bucket_refill_per_sec
+        self._ctrl_bucket[dev_id] = (tokens_now, now)
+        return max(0.0, wait)
+
     async def _debounced_control(self, device: Union[str, GoveeDevice], command: str, value: Any, *, delay: float = 0.25) -> Tuple[bool, str | None]:
         """Coalesce rapid updates per (device, command) with a small delay."""
         dev_id = device.device if isinstance(device, GoveeDevice) else str(device)
@@ -135,7 +155,21 @@ class GoveeClient:
         if co is None:
             co = _Coalescer(delay)
             self._coalesce[key] = co
-        fut = co.schedule(value, lambda v: self._control(device, command, v))
+
+        async def _send_latest(v):
+            # Enforce per-device 10/min budget without queuing outdated values.
+            # Coalescer will cancel this task if a newer value arrives while waiting.
+            while True:
+                wait = self._bucket_take(dev_id, 1.0)
+                if wait <= 0:
+                    break
+                try:
+                    await asyncio.sleep(wait)
+                except asyncio.CancelledError:
+                    raise
+            return await self._control(device, command, v)
+
+        fut = co.schedule(value, _send_latest)
         ok, err = await fut
         return ok, err
 
@@ -291,9 +325,10 @@ class GoveeClient:
 
         _LOGGER.debug("Sending control → %s %s: %s", device.device, command, value)
 
-        # Per-device throttle to avoid overwhelming API during rapid UI changes
+        # Short post-success cooldown (set below). Avoid long sleeps here to
+        # keep coalescer cancellations effective.
         now = time.monotonic()
-        if now < device.lock_set_until:
+        if now < device.lock_set_until and device.lock_set_until - now < 2.0:
             await asyncio.sleep(device.lock_set_until - now)
 
         await self._rate_limit_delay()
@@ -303,8 +338,8 @@ class GoveeClient:
             if resp.status == 429:
                 retry = max(0, self._reset - int(time.time()))
                 _LOGGER.warning("Rate limited for %s: retry after %ss", device.device, retry)
-                # Do not assume success; allow caller to keep actual state
-                device.lock_set_until = time.monotonic() + max(0.5, float(retry))
+                # Do not set a long device lock; let token bucket gate retries.
+                device.lock_set_until = time.monotonic() + 0.5
                 return False, f"Rate limit: retry in {retry}s"
 
             if resp.status != 200:
