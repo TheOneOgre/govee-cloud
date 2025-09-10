@@ -111,12 +111,16 @@ class GoveeDataUpdateCoordinator(DataUpdateCoordinator):
         return self._config_entry.options.get(CONF_OFFLINE_IS_OFF, False)
 
     async def _async_update(self):
-        """Fetch data from Govee API."""
+        """Refresh state: avoid re-listing devices every cycle."""
         try:
-            devices, err = await self._hub.get_devices()
-            if err:
-                raise UpdateFailed(err)
-            return devices
+            if not self._hub._devices:
+                devices, err = await self._hub.get_devices()
+                if err:
+                    raise UpdateFailed(err)
+            # Poll state for each known device, within per-device budget
+            for dev_id in list(self._hub._devices.keys()):
+                await self._hub.get_device_state(dev_id)
+            return list(self._hub._devices.values())
         except Exception as ex:
             raise UpdateFailed(f"Exception on getting states: {ex}") from ex
 
@@ -254,12 +258,17 @@ class GoveeLightEntity(LightEntity):
         if want_color:
             hs_color = kwargs[ATTR_HS_COLOR]
             col = color.color_hs_to_RGB(hs_color[0], hs_color[1])
-            ok, err = await self._hub.set_color(dev, col)
-            last_ok, last_err = ok, err
-            if ok:
-                dev.color = col
-                dev.color_temp = 0
-                dev.power_state = True
+            # Skip if same color to preserve rate budget
+            if tuple(col) == tuple(dev.color):
+                last_ok = True
+            else:
+                ok, err = await self._hub.set_color(dev, col)
+                last_ok, last_err = ok, err
+                if ok:
+                    dev.color = col
+                    dev.color_temp = 0
+                    dev.power_state = True
+                    dev.active_scene = None  # clear any prior effect/scene
         elif want_ct:
             # Accept both Kelvin (preferred) and mireds (deprecated) from HA
             if ATTR_COLOR_TEMP_KELVIN in kwargs:
@@ -281,21 +290,29 @@ class GoveeLightEntity(LightEntity):
                 "Turn_on CT → %s request=%sK clamped=%sK (range %s-%s step %s)",
                 dev.device, kwargs.get(ATTR_COLOR_TEMP_KELVIN) or kwargs.get("color_temp"), color_temp, vmin, vmax, step,
             )
-            ok, err = await self._hub.set_color_temp(dev, color_temp)
-            last_ok, last_err = ok, err
-            if ok:
-                dev.color_temp = color_temp
-                dev.color = (0, 0, 0)
-                dev.power_state = True
+            # Skip if same CT
+            if dev.color_temp == color_temp:
+                last_ok = True
+            else:
+                ok, err = await self._hub.set_color_temp(dev, color_temp)
+                last_ok, last_err = ok, err
+                if ok:
+                    dev.color_temp = color_temp
+                    dev.color = (0, 0, 0)
+                    dev.power_state = True
+                    dev.active_scene = None
 
         # Apply brightness after mode selection if requested
         if want_brightness:
             ha_bright = kwargs[ATTR_BRIGHTNESS]  # 0-255 from HA
-            ok, err = await self._hub.set_brightness(dev, ha_bright)
+            if dev.brightness == ha_bright:
+                ok, err = True, None
+            else:
+                ok, err = await self._hub.set_brightness(dev, ha_bright)
+                if ok:
+                    dev.brightness = ha_bright
+                    dev.power_state = True
             # Track the result but don't override an earlier failure if this succeeds
-            if ok:
-                dev.brightness = ha_bright
-                dev.power_state = True
             last_ok = last_ok or ok
             if err:
                 last_err = err

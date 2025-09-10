@@ -33,6 +33,8 @@ class GoveeDevice:
     # Quirk/apparatus flags (for future LAN/IOT support)
     lan_api_capable: bool = False
     avoid_platform_api: bool = False
+    # Active scene/effect name (internal; cleared on color/CT changes)
+    active_scene: Optional[str] = None
     # Learned overrides for CT range
     learned_color_temp_min: Optional[int] = None
     learned_color_temp_max: Optional[int] = None

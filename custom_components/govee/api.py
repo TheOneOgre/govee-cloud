@@ -82,6 +82,12 @@ class GoveeClient:
 
         # Lightweight duplicate suppression: last value per (device, command)
         self._last_sent: Dict[Tuple[str, str], Tuple[Any, float]] = {}
+        # Per-device state token bucket (10/min per device)
+        self._state_bucket: Dict[str, Tuple[float, float]] = {}
+        # Serialize per-device control to avoid interleaving color/ct/brightness
+        self._ctrl_locks: Dict[str, asyncio.Lock] = {}
+        # Post-control reconciliation throttle
+        self._last_post_poll: Dict[str, float] = {}
 
 
     @classmethod
@@ -149,6 +155,20 @@ class GoveeClient:
         needed = tokens - tokens_now
         wait = needed / self._bucket_refill_per_sec
         self._ctrl_bucket[dev_id] = (tokens_now, now)
+        return max(0.0, wait)
+
+    def _state_bucket_take(self, dev_id: str, tokens: float = 1.0) -> float:
+        now = time.monotonic()
+        tokens_now, last = self._state_bucket.get(dev_id, (self._bucket_capacity, now))
+        elapsed = max(0.0, now - last)
+        tokens_now = min(self._bucket_capacity, tokens_now + elapsed * self._bucket_refill_per_sec)
+        if tokens_now >= tokens:
+            tokens_now -= tokens
+            self._state_bucket[dev_id] = (tokens_now, now)
+            return 0.0
+        needed = tokens - tokens_now
+        wait = needed / self._bucket_refill_per_sec
+        self._state_bucket[dev_id] = (tokens_now, now)
         return max(0.0, wait)
 
     async def _debounced_control(self, device: Union[str, GoveeDevice], command: str, value: Any, *, delay: float = 0.25) -> Tuple[bool, str | None]:
@@ -307,6 +327,35 @@ class GoveeClient:
                     if ct_max is None:
                         ct_max = int(qmax)
 
+                # Derive support flags from capabilities if supportCmds is missing/empty
+                derived_turn = False
+                derived_brightness = False
+                derived_color = False
+                derived_ct = False
+                if isinstance(props, list):
+                    for p in props:
+                        inst = (p.get("instance") or "").lower()
+                        typ = (p.get("type") or p.get("name") or "").lower()
+                        if inst in {"powerswitch", "light"} or "power" in inst or "turn" in typ:
+                            derived_turn = True
+                        if inst == "brightness":
+                            derived_brightness = True
+                        if inst == "colorrgb" or "color" in inst:
+                            derived_color = True
+                        if inst in {"colortemperaturek", "color_temperature_k"} or "colortem" in inst:
+                            derived_ct = True
+                elif isinstance(props, dict):
+                    # Some responses present a dict of instances
+                    keys = {k.lower() for k in props.keys()}
+                    if {"powerswitch", "power", "turn"} & keys:
+                        derived_turn = True
+                    if "brightness" in keys:
+                        derived_brightness = True
+                    if {"colorrgb", "color"} & keys:
+                        derived_color = True
+                    if {"colortemperaturek", "colortem", "color_temperature_k"} & keys:
+                        derived_ct = True
+
                 self._devices[dev_id] = GoveeDevice(
                     device=dev_id,
                     model=model,
@@ -314,11 +363,11 @@ class GoveeClient:
                     controllable=item["controllable"],
                     retrievable=item["retrievable"],
                     support_cmds=support_cmds,
-                    support_turn="turn" in support_cmds,
-                    support_brightness="brightness" in support_cmds,
-                    support_color=("color" in support_cmds),
+                    support_turn=("turn" in support_cmds) or derived_turn,
+                    support_brightness=("brightness" in support_cmds) or derived_brightness,
+                    support_color=("color" in support_cmds) or derived_color,
                     # Consider color temp supported if API lists command OR we detected a CT range
-                    support_color_temp=("colorTem" in support_cmds) or (ct_min is not None or ct_max is not None),
+                    support_color_temp=("colorTem" in support_cmds) or derived_ct or (ct_min is not None or ct_max is not None),
                     color_temp_min=ct_min,
                     color_temp_max=ct_max,
                     color_temp_step=ct_step or 1,
@@ -375,7 +424,15 @@ class GoveeClient:
         if not device.controllable:
             return False, f"Device {device.device} not controllable"
         if command not in device.support_cmds:
-            return False, f"Command {command} not supported"
+            # Fall back to derived support flags when supportCmds is missing/empty
+            if command == "turn" and not device.support_turn:
+                return False, f"Command {command} not supported"
+            if command == "brightness" and not device.support_brightness:
+                return False, f"Command {command} not supported"
+            if command == "color" and not device.support_color:
+                return False, f"Command {command} not supported"
+            if command == "colorTem" and not device.support_color_temp:
+                return False, f"Command {command} not supported"
 
         payload = {
             "device": device.device,
@@ -383,17 +440,24 @@ class GoveeClient:
             "cmd": {"name": command, "value": value},
         }
 
-        _LOGGER.debug("Sending control → %s %s: %s", device.device, command, value)
+        # Ensure single in-flight control per device (all commands)
+        lock = self._ctrl_locks.get(device.device)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._ctrl_locks[device.device] = lock
 
-        # Short post-success cooldown (set below). Avoid long sleeps here to
-        # keep coalescer cancellations effective.
-        now = time.monotonic()
-        if now < device.lock_set_until and device.lock_set_until - now < 2.0:
-            await asyncio.sleep(device.lock_set_until - now)
+        async with lock:
+            _LOGGER.debug("Sending control → %s %s: %s", device.device, command, value)
 
-        await self._rate_limit_delay()
-        async with self._session.put(_API_CONTROL, headers=self._headers(), json=payload) as resp:
-            self._track_rate_limit(resp)
+            # Short post-success cooldown (set below). Avoid long sleeps here to
+            # keep coalescer cancellations effective.
+            now = time.monotonic()
+            if now < device.lock_set_until and device.lock_set_until - now < 2.0:
+                await asyncio.sleep(device.lock_set_until - now)
+
+            await self._rate_limit_delay()
+            async with self._session.put(_API_CONTROL, headers=self._headers(), json=payload) as resp:
+                self._track_rate_limit(resp)
 
             if resp.status == 429:
                 retry = max(0, self._reset - int(time.time()))
@@ -405,13 +469,15 @@ class GoveeClient:
             if resp.status != 200:
                 return False, f"API error {resp.status}: {await resp.text()}"
 
-            result = await resp.json()
-            if result.get("message") == "Success":
-                _LOGGER.debug("Control success ← %s %s", device.device, command)
-                device.lock_set_until = time.monotonic() + 0.8
-                return True, None
-            _LOGGER.debug("Control failure ← %s %s: %s", device.device, command, result)
-            return False, None
+                result = await resp.json()
+                if result.get("message") == "Success":
+                    _LOGGER.debug("Control success ← %s %s", device.device, command)
+                    device.lock_set_until = time.monotonic() + 0.8
+                    # Schedule a reconciliatory state fetch shortly after
+                    self._schedule_post_control_poll(device.device)
+                    return True, None
+                _LOGGER.debug("Control failure ← %s %s: %s", device.device, command, result)
+                return False, None
 
 
 
@@ -484,6 +550,13 @@ class GoveeClient:
     async def get_device_state(self, device_id: str) -> Tuple[bool, str | None]:
         """Fetch current state of a device via API."""
         payload = {"device": device_id, "model": self._devices[device_id].model}
+        # Respect 10/min per device
+        wait = self._state_bucket_take(device_id, 1.0)
+        if wait > 0:
+            try:
+                await asyncio.sleep(wait)
+            except asyncio.CancelledError:
+                return False, "Cancelled"
         await self._rate_limit_delay()
         async with self._session.get(f"{_API_BASE}/devices/state", headers=self._headers(), params=payload) as resp:
             self._track_rate_limit(resp)
@@ -535,4 +608,21 @@ class GoveeClient:
             dev.online = True
 
             return True, None
+
+    def _schedule_post_control_poll(self, device_id: str, delay: float = 5.0):
+        now = time.monotonic()
+        last = self._last_post_poll.get(device_id, 0.0)
+        # Throttle to at most one scheduled poll per 20 seconds
+        if (now - last) < 20.0:
+            return
+        self._last_post_poll[device_id] = now
+
+        async def runner():
+            try:
+                await asyncio.sleep(delay)
+                await self.get_device_state(device_id)
+            except Exception:
+                return
+
+        asyncio.create_task(runner())
 
