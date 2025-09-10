@@ -263,14 +263,23 @@ class GoveeClient:
             if resp.status != 200:
                 return [], f"API error {resp.status}: {await resp.text()}"
             data = await resp.json()
-            if "data" not in data or "devices" not in data["data"]:
+            if "data" not in data:
+                return [], "Malformed API response"
+
+            # Support both standard and alternate schemas
+            raw = data.get("data")
+            if isinstance(raw, dict) and "devices" in raw:
+                items = raw["devices"]
+            elif isinstance(raw, list):
+                items = raw
+            else:
                 return [], "Malformed API response"
 
             timestamp = int(time.time())
             learning_infos = await self._storage.read()
 
-            _LOGGER.debug("Discovered %s devices from Govee API", len(data["data"]["devices"]))
-            for item in data["data"]["devices"]:
+            _LOGGER.debug("Discovered %s devices from Govee API", len(items))
+            for item in items:
                 dev_id = item["device"]
                 if dev_id in self._devices:
                     continue
@@ -335,7 +344,7 @@ class GoveeClient:
 
                 support_cmds = item.get("supportCmds", [])
                 # Apply model-specific quirks if known
-                model = item.get("model")
+                model = item.get("model") or item.get("sku") or item.get("type") or "unknown"
                 quirk = resolve_quirk(model) if model else None
                 if quirk and quirk.color_temp_range:
                     qmin, qmax = quirk.color_temp_range
@@ -376,9 +385,9 @@ class GoveeClient:
                 self._devices[dev_id] = GoveeDevice(
                     device=dev_id,
                     model=model,
-                    device_name=item["deviceName"],
-                    controllable=item["controllable"],
-                    retrievable=item["retrievable"],
+                    device_name=item.get("deviceName") or item.get("device_name") or dev_id,
+                    controllable=bool(item.get("controllable", True)),
+                    retrievable=bool(item.get("retrievable", True)),
                     support_cmds=support_cmds,
                     support_turn=("turn" in support_cmds) or derived_turn,
                     support_brightness=("brightness" in support_cmds) or derived_brightness,
@@ -620,7 +629,7 @@ class GoveeClient:
 
     async def set_color(self, device, rgb: Tuple[int, int, int]):
         # Defensive: only send if supported
-        if "color" not in device.support_cmds:
+        if not getattr(device, "support_color", False):
             return False, "Device does not support color"
         return await self._debounced_control(device, "color", {
             "r": rgb[0],
