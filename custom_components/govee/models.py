@@ -30,6 +30,9 @@ class GoveeDevice:
     color_temp_min: Optional[int] = None
     color_temp_max: Optional[int] = None
     color_temp_step: int = 1
+    # Learned overrides for CT range
+    learned_color_temp_min: Optional[int] = None
+    learned_color_temp_max: Optional[int] = None
     # Some models expect color temperature as 0-100 percent instead of Kelvin
     color_temp_send_percent: Optional[bool] = None
     timestamp: int = 0
@@ -42,6 +45,8 @@ class GoveeDevice:
     # Lightweight throttle windows (monotonic seconds)
     lock_set_until: float = 0.0
     lock_get_until: float = 0.0
+    # Last time we attempted CT range learning
+    last_ct_learn_ts: float = 0.0
 
 
 @dataclass
@@ -50,5 +55,6 @@ class GoveeLearnedInfo:
     get_brightness_max: Optional[int] = None
     before_set_brightness_turn_on: bool = False
     config_offline_is_off: bool = False
-    # Persist whether this device expects CT as percent (0-100)
-    color_temp_send_percent: Optional[bool] = None
+    # Persist learned CT range overrides
+    learned_color_temp_min: Optional[int] = None
+    learned_color_temp_max: Optional[int] = None

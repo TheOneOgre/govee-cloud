@@ -229,8 +229,8 @@ class GoveeClient:
                     support_color=("color" in support_cmds),
                     # Consider color temp supported if API lists command OR we detected a CT range
                     support_color_temp=("colorTem" in support_cmds) or (ct_min is not None or ct_max is not None),
-                    color_temp_min=ct_min,
-                    color_temp_max=ct_max,
+                    color_temp_min=learning_infos.get(dev_id, GoveeLearnedInfo()).learned_color_temp_min or ct_min,
+                    color_temp_max=learning_infos.get(dev_id, GoveeLearnedInfo()).learned_color_temp_max or ct_max,
                     color_temp_step=ct_step or 1,
                     online=True,
                     timestamp=timestamp,
@@ -239,7 +239,8 @@ class GoveeClient:
                     learned_get_brightness_max=learned.get_brightness_max,
                     before_set_brightness_turn_on=learned.before_set_brightness_turn_on,
                     config_offline_is_off=learned.config_offline_is_off,
-                    color_temp_send_percent=learned.color_temp_send_percent,
+                    learned_color_temp_min=learning_infos.get(dev_id, GoveeLearnedInfo()).learned_color_temp_min,
+                    learned_color_temp_max=learning_infos.get(dev_id, GoveeLearnedInfo()).learned_color_temp_max,
                 )
 
                 # Log capabilities to help debug missing devices/models
@@ -356,6 +357,44 @@ class GoveeClient:
 
         ok, err = await self._debounced_control(dev or device, "colorTem", kelvin)
 
+        # Learn actual CT limits if device silently clamps
+        if ok and dev:
+            try:
+                # Avoid learning too often (<= once per 20s)
+                now = time.monotonic()
+                if now - getattr(dev, "last_ct_learn_ts", 0.0) > 20.0:
+                    dev.last_ct_learn_ts = now
+                    await asyncio.sleep(0.35)
+                    ok_state, _ = await self.get_device_state(dev.device)
+                    if ok_state and dev.color_temp:
+                        observed = int(dev.color_temp)
+                        if abs(observed - kelvin) >= 200:
+                            # Adjust min/max toward observed value
+                            if observed < kelvin:
+                                # Cap max
+                                new_max = max(vmin, observed)
+                                if dev.color_temp_max != new_max:
+                                    _LOGGER.warning(
+                                        "Device %s CT appears capped at %sK (requested %sK). Learning max=%sK.",
+                                        dev.device, observed, kelvin, new_max,
+                                    )
+                                    dev.color_temp_max = new_max
+                                    dev.learned_color_temp_max = new_max
+                                    await self._persist_learning()
+                            elif observed > kelvin:
+                                # Raise min
+                                new_min = min(vmax, observed)
+                                if dev.color_temp_min != new_min:
+                                    _LOGGER.warning(
+                                        "Device %s CT appears floored at %sK (requested %sK). Learning min=%sK.",
+                                        dev.device, observed, kelvin, new_min,
+                                    )
+                                    dev.color_temp_min = new_min
+                                    dev.learned_color_temp_min = new_min
+                                    await self._persist_learning()
+            except Exception:
+                pass
+
         return ok, err
 
     async def _persist_learning(self):
@@ -368,7 +407,8 @@ class GoveeClient:
                     get_brightness_max=dev.learned_get_brightness_max,
                     before_set_brightness_turn_on=dev.before_set_brightness_turn_on,
                     config_offline_is_off=dev.config_offline_is_off,
-                    color_temp_send_percent=dev.color_temp_send_percent,
+                    learned_color_temp_min=dev.learned_color_temp_min,
+                    learned_color_temp_max=dev.learned_color_temp_max,
                 )
             await self._storage.write(infos)
         except Exception as ex:
