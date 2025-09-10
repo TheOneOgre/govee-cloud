@@ -9,8 +9,7 @@ from aiohttp import ClientSession
 from typing import Any, Dict, List, Tuple, Union
 
 from .models import GoveeDevice, GoveeSource, GoveeLearnedInfo
-from .const import CONF_PLATFORM_APP_ENABLED, CONF_IOT_EMAIL, CONF_IOT_PASSWORD
-from .platform_app import PlatformAppClient
+from .const import CONF_IOT_EMAIL, CONF_IOT_PASSWORD
 from .quirks import resolve_quirk
 
 _LOGGER = logging.getLogger(__name__)
@@ -71,6 +70,8 @@ class GoveeClient:
         self._devices: Dict[str, GoveeDevice] = {}
         self._session: aiohttp.ClientSession | None = None
         self._ssl_context: ssl.SSLContext | None = None  # define upfront
+        self._hass = None
+        self._config_entry = None
 
         # rate limit
         self._limit = 100
@@ -94,14 +95,15 @@ class GoveeClient:
         self._ctrl_locks: Dict[str, asyncio.Lock] = {}
         # Post-control reconciliation throttle
         self._last_post_poll: Dict[str, float] = {}
-        # Optional Platform App control client (experimental)
-        self._platform_app: PlatformAppClient | None = None
+        # Platform App control removed; IoT is preferred
 
 
     @classmethod
     async def create(cls, api_key: str, storage, hass=None, config_entry=None):
         """Async-safe constructor."""
         self = cls(api_key, storage)
+        self._hass = hass
+        self._config_entry = config_entry
 
         # Async-safe SSL context creation
         if hass is not None:
@@ -112,15 +114,7 @@ class GoveeClient:
             self._ssl_context = ssl.create_default_context(cafile=certifi.where())
 
         await self._init_session()
-        # Initialize Platform App client if configured
-        try:
-            if config_entry and config_entry.options.get(CONF_PLATFORM_APP_ENABLED, False):
-                email = config_entry.options.get(CONF_IOT_EMAIL)
-                password = config_entry.options.get(CONF_IOT_PASSWORD)
-                if email and password:
-                    self._platform_app = PlatformAppClient(email, password)
-        except Exception as ex:
-            _LOGGER.warning("PlatformApp init failed: %s", ex)
+        # No Platform App init
         return self
 
     async def _init_session(self):
@@ -482,69 +476,7 @@ class GoveeClient:
                 await asyncio.sleep(device.lock_set_until - now)
 
             # Experimental: Try Platform App control first if enabled
-            if self._platform_app:
-                try:
-                    if command == "turn":
-                        ok = await self._platform_app.control_turn(device.model, device.device, value == "on")
-                        if ok:
-                            now = time.monotonic()
-                            device.pending_until = now + 2.0
-                            return True, None
-                        else:
-                            _LOGGER.debug("PlatformApp turn failed; falling back to Developer API")
-                    elif command == "brightness":
-                        ok = await self._platform_app.control_brightness(device.model, device.device, int(value))
-                        if ok:
-                            now = time.monotonic()
-                            device.pending_until = now + 2.0
-                            try:
-                                ha_val = int(round(float(value) / 100 * 255))
-                            except Exception:
-                                ha_val = None
-                            device.pending_brightness = ha_val
-                            return True, None
-                        else:
-                            _LOGGER.debug("PlatformApp brightness failed; falling back to Developer API")
-                    elif command == "color":
-                        ok = await self._platform_app.control_colorwc(
-                            device.model,
-                            device.device,
-                            r=value.get("r", 0),
-                            g=value.get("g", 0),
-                            b=value.get("b", 0),
-                            kelvin=0,
-                        )
-                        if ok:
-                            now = time.monotonic()
-                            device.pending_until = now + 2.0
-                            device.pending_color = (
-                                int(value.get("r", 0)),
-                                int(value.get("g", 0)),
-                                int(value.get("b", 0)),
-                            )
-                            device.pending_ct = 0
-                            return True, None
-                        else:
-                            _LOGGER.debug("PlatformApp color failed; falling back to Developer API")
-                    elif command == "colorTem":
-                        ok = await self._platform_app.control_colorwc(
-                            device.model,
-                            device.device,
-                            r=0,
-                            g=0,
-                            b=0,
-                            kelvin=int(value),
-                        )
-                        if ok:
-                            now = time.monotonic()
-                            device.pending_until = now + 2.0
-                            device.pending_ct = int(value)
-                            device.pending_color = (0, 0, 0)
-                            return True, None
-                        else:
-                            _LOGGER.debug("PlatformApp colorTem failed; falling back to Developer API")
-                except Exception as ex:
-                    _LOGGER.debug("PlatformApp control error: %s. Falling back to Developer API", ex)
+            # Platform App control removed
 
             await self._rate_limit_delay()
         async with self._session.put(_API_CONTROL, headers=self._headers(), json=payload) as resp:
@@ -785,3 +717,33 @@ class GoveeClient:
                 return
 
         asyncio.create_task(runner())
+        # Preferred: IoT (AWS MQTT) control if enabled and available
+        try:
+            from .const import DOMAIN, CONF_IOT_CONTROL_ENABLED, CONF_IOT_PUSH_ENABLED
+            if self._hass and self._config_entry and self._config_entry.options.get(CONF_IOT_PUSH_ENABLED, False) and self._config_entry.options.get(CONF_IOT_CONTROL_ENABLED, True):
+                entry_id = self._config_entry.entry_id
+                entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id)
+                iot = entry_data and entry_data.get("iot_client")
+                if iot and getattr(iot, "can_control", False):
+                    ok = await iot.async_publish_control(device.device, command, value)
+                    if ok:
+                        # Record pending expectation for UI smoothing
+                        now = time.monotonic()
+                        device.lock_set_until = now + 0.8
+                        device.pending_until = now + 2.0
+                        try:
+                            if command == "brightness":
+                                device.pending_brightness = max(0, min(255, int(round(int(value) / 100 * 255))))
+                            elif command == "color":
+                                device.pending_color = (int(value.get("r",0)), int(value.get("g",0)), int(value.get("b",0)))
+                                device.pending_ct = 0
+                            elif command == "colorTem":
+                                device.pending_ct = int(value)
+                                device.pending_color = (0,0,0)
+                        except Exception:
+                            pass
+                        # Schedule post-control poll via REST less frequently to reconcile
+                        self._schedule_post_control_poll(device.device)
+                        return True, None
+        except Exception as ex:
+            _LOGGER.debug("IoT control path error: %s", ex)

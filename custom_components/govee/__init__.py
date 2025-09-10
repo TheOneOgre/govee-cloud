@@ -24,10 +24,9 @@ async def async_setup(hass: HomeAssistant, config: dict):
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up Govee from a config entry."""
 
-    api_key = entry.options.get(CONF_API_KEY, entry.data.get(CONF_API_KEY, ""))
-
     storage = GoveeLearningStorage(hass.config.config_dir, hass)
-    hub = await GoveeClient.create(api_key, storage, hass, config_entry=entry)
+    # API key no longer required; use IoT discovery
+    hub = await GoveeClient.create("", storage, hass, config_entry=entry)
 
 
     # New style: per entry_id
@@ -37,7 +36,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     devices, err = await hub.get_devices()
     if err:
-        _LOGGER.warning("Could not connect to Govee API at startup: %s", err)
+        _LOGGER.warning("Could not load Govee devices at startup: %s", err)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 

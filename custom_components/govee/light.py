@@ -22,6 +22,8 @@ from .const import (
     CONF_OFFLINE_IS_OFF,
     CONF_USE_ASSUMED_STATE,
     CONF_POLLING_MODE, 
+    CONF_IOT_PUSH_ENABLED,
+    CONF_IOT_CONTROL_ENABLED,
     COLOR_TEMP_KELVIN_MIN,
     COLOR_TEMP_KELVIN_MAX,
 )
@@ -52,15 +54,25 @@ async def async_setup_entry(hass, entry, async_add_entities):
         delay = max(30, int(86400 / (10000 / num_devices)))  # safe under 10k/day
 
     if mode == "auto":
-        tmp_devices, _ = await hub.get_devices()
-        device_count = max(1, len(tmp_devices))
-        safe_delay = max(30, int(86400 * device_count / 10000))  # 10k/day quota
-        update_interval = timedelta(seconds=safe_delay)
-        _LOGGER.warning(
-            "Polling mode AUTO: %s devices → interval set to %ss (safe under 10k/day quota).",
-            device_count,
-            safe_delay,
-        )
+        # If IoT push + control are enabled, we can drastically reduce REST polling
+        iot_opts_enabled = options.get(CONF_IOT_PUSH_ENABLED, False) and options.get(CONF_IOT_CONTROL_ENABLED, True)
+        if iot_opts_enabled:
+            safe_delay = 6 * 60 * 60  # 6 hours
+            update_interval = timedelta(seconds=safe_delay)
+            _LOGGER.warning(
+                "Polling minimized due to IoT control: interval set to %ss.",
+                safe_delay,
+            )
+        else:
+            tmp_devices, _ = await hub.get_devices()
+            device_count = max(1, len(tmp_devices))
+            safe_delay = max(30, int(86400 * device_count / 10000))  # 10k/day quota
+            update_interval = timedelta(seconds=safe_delay)
+            _LOGGER.warning(
+                "Polling mode AUTO: %s devices → interval set to %ss (safe under 10k/day quota).",
+                device_count,
+                safe_delay,
+            )
     else:  # manual mode
         update_interval = timedelta(seconds=delay)
         _LOGGER.warning(

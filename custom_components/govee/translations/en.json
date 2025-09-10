@@ -4,18 +4,9 @@
       "user": {
         "title": "Govee Setup",
         "data": {
-          "api_key": "Developer API Key",
-          "delay": "Polling Delay (seconds, 0 = auto)",
-          "enable_iot_push": "BETA-HighSpeedStates: Update device state using AWS",
-          "enable_platform_app_control": "BETA: Control using PlatformAPI for fewer rate-limits"
-        }
-      },
-      "iot": {
-        "title": "Govee App Login",
-        "description": "Provide your Govee app credentials to enable AWS IoT state updates.",
-        "data": {
           "iot_email": "Username",
-          "iot_password": "Password"
+          "iot_password": "Password",
+          "delay": "Polling Delay (seconds, 0 = auto)"
         }
       }
     }
@@ -25,21 +16,9 @@
       "user": {
         "title": "Govee Options",
         "data": {
-          "api_key": "Developer API Key",
           "delay": "Polling Delay (seconds, 0 = auto)",
           "use_assumed_state": "Use Assumed State for history source",
-          "offline_is_off": "Treat offline devices as off",
-          "disable_attribute_updates": "Disable attribute updates (comma-separated)",
-          "enable_iot_push": "BETA-HighSpeedStates: Update device state using AWS",
-          "enable_platform_app_control": "BETA: Control using PlatformAPI for fewer rate-limits"
-        }
-      },
-      "iot": {
-        "title": "Govee App Login",
-        "description": "Provide your Govee app credentials to enable AWS IoT state updates.",
-        "data": {
-          "iot_email": "Username",
-          "iot_password": "Password"
+          "offline_is_off": "Treat offline devices as off"
         }
       }
     }

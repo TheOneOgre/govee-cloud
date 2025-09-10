@@ -105,6 +105,8 @@ class GoveeIoTClient:
         self._hub = hub
         self._iot: IoTState | None = None
         self._last_reconcile: dict[str, float] = {}
+        self._device_topics: dict[str, str] = {}
+        self._account_topic: str | None = None
 
     async def start(self):
         opts = self._entry.options
@@ -114,87 +116,93 @@ class GoveeIoTClient:
         if not enabled or not email or not password:
             return
         loop = asyncio.get_running_loop()
-        # Login and fetch IoT key in executor
+        # Login and fetch IoT key in executor, with 15-day on-disk cache
         try:
-            now = time.monotonic()
+            import json as _json
+            cache_dir = self._hass.config.path('.storage/govee_iot')
+            os.makedirs(cache_dir, exist_ok=True)
+            token_path = os.path.join(cache_dir, 'token.json')
+            cert_path = os.path.join(cache_dir, 'cert.pem')
+            key_path = os.path.join(cache_dir, 'key.pem')
+            endpoint_path = os.path.join(cache_dir, 'endpoint.txt')
+            now_wall = time.time()
+            ttl = 15 * 24 * 60 * 60  # 15 days
+
             token: str | None = None
-            acct: dict[str, Any] | None = None
-            # Use cached app login token if fresh
-            cached = _APP_LOGIN_CACHE.get(email)
-            if cached and (now - cached[1]) < _CACHE_TTL_SEC:
-                acct = cached[0]
-                token = acct.get("token") or acct.get("accessToken")
-            else:
-                acct = await loop.run_in_executor(None, _login, email, password)
+            account_id: str | None = None
+            # Try cached token from disk first
+            try:
+                tok = _json.load(open(token_path, 'r', encoding='utf-8'))
+                if (now_wall - float(tok.get('ts', 0))) < ttl:
+                    token = tok.get('token')
+                    self._account_topic = tok.get('accountTopic')
+                    account_id = tok.get('accountId')
+            except Exception:
+                token = None
+
+            # If no valid disk token, try in-memory cache, else login
+            if not token:
+                now_mono = time.monotonic()
+                cached = _APP_LOGIN_CACHE.get(email)
+                acct: dict[str, Any] | None = None
+                if cached and (now_mono - cached[1]) < _CACHE_TTL_SEC:
+                    acct = cached[0]
+                else:
+                    acct = await loop.run_in_executor(None, _login, email, password)
+                    _APP_LOGIN_CACHE[email] = (acct, now_mono)
                 token = acct.get("token") or acct.get("accessToken")
                 if not token:
                     _LOGGER.warning("Govee IoT: no token from login response")
                     return
-                _APP_LOGIN_CACHE[email] = (acct, now)
+                tval = acct.get("topic")
+                if isinstance(tval, dict) and 'value' in tval:
+                    tval = tval['value']
+                self._account_topic = tval if isinstance(tval, str) else None
+                account_id = acct.get('accountId') or acct.get('account_id')
+                try:
+                    _json.dump({
+                        'token': token,
+                        'accountTopic': self._account_topic,
+                        'accountId': account_id,
+                        'clientId': _client_id(email),
+                        'ts': now_wall,
+                    }, open(token_path, 'w', encoding='utf-8'))
+                except Exception:
+                    pass
 
-            # Use cached IoT key if fresh
-            iot: dict[str, Any]
-            iot_cached = _IOT_KEY_CACHE.get(email)
-            if iot_cached and (now - iot_cached[1]) < _CACHE_TTL_SEC:
-                iot = iot_cached[0]
-            else:
+            # Load endpoint and cert/key from cache if fresh; otherwise fetch
+            endpoint: str | None = None
+            try:
+                if (now_wall - os.stat(cert_path).st_mtime) < ttl and os.path.exists(key_path) and os.path.exists(endpoint_path):
+                    endpoint = open(endpoint_path, 'r', encoding='utf-8').read().strip()
+            except Exception:
+                endpoint = None
+
+            if not endpoint:
                 iot = await loop.run_in_executor(None, _get_iot_key, token, email)
-                _IOT_KEY_CACHE[email] = (iot, now)
-            endpoint = iot.get("endpoint")
-            p12_pass = iot.get("p12Pass") or iot.get("p12_pass")
-            key_pem, cert_pem = await loop.run_in_executor(
-                None, _extract_pfx, iot["p12"], p12_pass
-            )
+                endpoint = iot.get("endpoint")
+                p12_pass = iot.get("p12Pass") or iot.get("p12_pass")
+                key_pem, cert_pem = await loop.run_in_executor(None, _extract_pfx, iot["p12"], p12_pass)
+                try:
+                    open(cert_path, 'wb').write(cert_pem)
+                    open(key_path, 'wb').write(key_pem)
+                    open(endpoint_path, 'w', encoding='utf-8').write(endpoint or '')
+                except Exception:
+                    pass
         except Exception as ex:
             _LOGGER.warning("Govee IoT login failed: %s", ex)
             return
 
-        # Prepare SSL context with extracted certs in executor (avoid blocking loop)
-        loop = asyncio.get_running_loop()
-
-        def _build_ctx() -> tuple[ssl.SSLContext, str, str]:
+        # Prepare SSL context from cached files
+        try:
             ctx = ssl.create_default_context()
             ctx.load_verify_locations(cafile=certifi.where())
-            kf = tempfile.NamedTemporaryFile("wb", delete=False)
-            cf = tempfile.NamedTemporaryFile("wb", delete=False)
-            try:
-                kf.write(key_pem)
-                cf.write(cert_pem)
-                kf.flush()
-                cf.flush()
-                ctx.load_cert_chain(certfile=cf.name, keyfile=kf.name)
-            except Exception:
-                # Clean up on failure
-                try:
-                    kf.close()
-                    os.unlink(kf.name)
-                except Exception:
-                    pass
-                try:
-                    cf.close()
-                    os.unlink(cf.name)
-                except Exception:
-                    pass
-                raise
-            finally:
-                # Close handles but keep files for the life of the client
-                try:
-                    kf.close()
-                except Exception:
-                    pass
-                try:
-                    cf.close()
-                except Exception:
-                    pass
-            return ctx, cf.name, kf.name
-
-        try:
-            ctx, certfile_path, keyfile_path = await loop.run_in_executor(None, _build_ctx)
+            ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
         except Exception as ex:
             _LOGGER.warning("Govee IoT SSL context failed: %s", ex)
             return
 
-        client = MqttClient(client_id=f"AP/{acct.get('accountId')}/{uuid.uuid4().hex}")
+        client = MqttClient(client_id=f"AP/{account_id}/{uuid.uuid4().hex}")
         client.tls_set_context(ctx)
 
         iot_state = IoTState(
@@ -202,8 +210,8 @@ class GoveeIoTClient:
             entry_id=self._entry.entry_id,
             hub=self._hub,
             mqtt=client,
-            certfile_path=certfile_path,
-            keyfile_path=keyfile_path,
+            certfile_path=cert_path,
+            keyfile_path=key_path,
         )
         self._iot = iot_state
 
@@ -221,7 +229,7 @@ class GoveeIoTClient:
 
         def on_connect(_client, _userdata, _flags, rc):
             _LOGGER.info("Govee IoT connected rc=%s", rc)
-            topic = acct.get("topic")
+            topic = self._account_topic
             if topic:
                 client.subscribe(topic, qos=0)
                 _LOGGER.info("Subscribed to account topic: %s", topic)
@@ -235,6 +243,13 @@ class GoveeIoTClient:
             client.loop_start()
         except Exception as ex:
             _LOGGER.warning("Govee IoT connect failed: %s", ex)
+
+        # Build device→topic map using the mobile device list API
+        try:
+            await loop.run_in_executor(None, self._refresh_device_topics, token, email)
+            _LOGGER.info("Loaded %s IoT device topics", len(self._device_topics))
+        except Exception as ex:
+            _LOGGER.debug("Refresh device topics failed: %s", ex)
 
     def _schedule_state_update(self, device_id: str, state: Dict[str, Any]):
         async def _apply():
@@ -350,3 +365,131 @@ class GoveeIoTClient:
                         os.unlink(p)
                     except Exception:
                         pass
+
+    def _refresh_device_topics(self, token: str, email: str):
+        resp = requests.post(
+            "https://app2.govee.com/device/rest/devices/v1/list",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "appVersion": APP_VERSION,
+                "clientId": _client_id(email),
+                "clientType": "1",
+                "iotVersion": "0",
+                "timestamp": _ms_ts(),
+                "User-Agent": _ua(),
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        devices = []
+        if isinstance(data, dict):
+            if isinstance(data.get("devices"), list):
+                devices = data["devices"]
+            elif isinstance(data.get("data"), dict) and isinstance(data["data"].get("devices"), list):
+                devices = data["data"]["devices"]
+        mapping: dict[str, str] = {}
+        for d in devices:
+            dev_id = d.get("device") or d.get("deviceId") or ""
+            ext = d.get("deviceExt") or d.get("device_ext")
+            # Some payloads embed JSON strings
+            try:
+                if isinstance(ext, str) and ext.strip().startswith("{"):
+                    ext = __import__("json").loads(ext)
+            except Exception:
+                pass
+            topic = None
+            if isinstance(ext, dict):
+                ds = ext.get("deviceSettings") or ext.get("device_settings")
+                try:
+                    if isinstance(ds, str) and ds.strip().startswith("{"):
+                        ds = __import__("json").loads(ds)
+                except Exception:
+                    pass
+                if isinstance(ds, dict):
+                    t = ds.get("topic")
+                    if isinstance(t, dict) and "value" in t:
+                        topic = t["value"]
+                    elif isinstance(t, str):
+                        topic = t
+            if dev_id and topic:
+                mapping[dev_id] = topic
+        self._device_topics = mapping
+        # Persist to disk for reuse
+        try:
+            cache_dir = self._hass.config.path('.storage/govee_iot')
+            os.makedirs(cache_dir, exist_ok=True)
+            path = os.path.join(cache_dir, 'devices.json')
+            __import__('json').dump(mapping, open(path, 'w', encoding='utf-8'))
+        except Exception:
+            pass
+
+    @property
+    def can_control(self) -> bool:
+        return bool(self._iot and self._iot.mqtt and self._device_topics and self._account_topic)
+
+    async def async_publish_control(self, device_id: str, command: str, value: Any) -> bool:
+        if not self.can_control:
+            return False
+        topic = self._device_topics.get(device_id)
+        if not topic:
+            return False
+        # Build app-like envelope
+        msg: dict[str, Any] = {
+            "accountTopic": self._account_topic,
+            "cmd": None,
+            "data": None,
+            "cmdVersion": 1,
+            "transaction": f"v_{_ms_ts()}000",
+            "type": 1,
+        }
+        if command == "turn":
+            msg["cmd"] = "turn"
+            msg["data"] = {"val": 1 if str(value).lower() == "on" else 0}
+        elif command == "brightness":
+            msg["cmd"] = "brightness"
+            msg["data"] = {"val": int(value)}
+        elif command == "color":
+            msg["cmd"] = "color"
+            msg["data"] = {
+                "r": int(value.get("r", 0)),
+                "g": int(value.get("g", 0)),
+                "b": int(value.get("b", 0)),
+            }
+        elif command == "colorTem":
+            msg["cmd"] = "colorwc"
+            msg["data"] = {"color": {"r": 0, "g": 0, "b": 0}, "colorTemInKelvin": int(value)}
+        else:
+            return False
+        payload = {"msg": msg}
+        try:
+            js = __import__('json').dumps(payload, separators=(',', ':'))
+            # QoS 0 like the app
+            self._iot.mqtt.publish(topic, js, qos=0, retain=False)
+            return True
+        except Exception as ex:
+            _LOGGER.debug("IoT publish failed: %s", ex)
+            return False
+
+    async def async_request_status(self, device_id: str) -> bool:
+        """Request status via device topic to seed state at startup."""
+        if not self.can_control:
+            return False
+        topic = self._device_topics.get(device_id)
+        if not topic:
+            return False
+        msg = {
+            "cmd": "status",
+            "cmdVersion": 2,
+            "transaction": f"v_{_ms_ts()}000",
+            "type": 0,
+            # Some firmwares accept accountTopic inside msg, but for status it is optional
+        }
+        payload = {"msg": msg}
+        try:
+            js = __import__('json').dumps(payload, separators=(',', ':'))
+            self._iot.mqtt.publish(topic, js, qos=0, retain=False)
+            return True
+        except Exception as ex:
+            _LOGGER.debug("IoT status publish failed: %s", ex)
+            return False
