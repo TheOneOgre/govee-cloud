@@ -477,16 +477,43 @@ class GoveeClient:
                 try:
                     if command == "turn":
                         ok = await self._platform_app.control_turn(device.model, device.device, value == "on")
-                        return (True, None) if ok else (False, "PlatformApp turn failed")
+                        if ok:
+                            # Set pending expectation
+                            now = time.monotonic()
+                            device.pending_until = now + 2.0
+                            # Power only; no value field
+                            return True, None
+                        return False, "PlatformApp turn failed"
                     if command == "brightness":
                         ok = await self._platform_app.control_brightness(device.model, device.device, int(value))
-                        return (True, None) if ok else (False, "PlatformApp brightness failed")
+                        if ok:
+                            now = time.monotonic()
+                            device.pending_until = now + 2.0
+                            try:
+                                ha_val = int(round(float(value) / 100 * 255))
+                            except Exception:
+                                ha_val = None
+                            device.pending_brightness = ha_val
+                            return True, None
+                        return False, "PlatformApp brightness failed"
                     if command == "color":
                         ok = await self._platform_app.control_colorwc(device.model, device.device, r=value.get("r",0), g=value.get("g",0), b=value.get("b",0), kelvin=0)
-                        return (True, None) if ok else (False, "PlatformApp color failed")
+                        if ok:
+                            now = time.monotonic()
+                            device.pending_until = now + 2.0
+                            device.pending_color = (int(value.get("r",0)), int(value.get("g",0)), int(value.get("b",0)))
+                            device.pending_ct = 0
+                            return True, None
+                        return False, "PlatformApp color failed"
                     if command == "colorTem":
                         ok = await self._platform_app.control_colorwc(device.model, device.device, r=0,g=0,b=0, kelvin=int(value))
-                        return (True, None) if ok else (False, "PlatformApp colorTem failed")
+                        if ok:
+                            now = time.monotonic()
+                            device.pending_until = now + 2.0
+                            device.pending_ct = int(value)
+                            device.pending_color = (0,0,0)
+                            return True, None
+                        return False, "PlatformApp colorTem failed"
                 except Exception as ex:
                     _LOGGER.debug("PlatformApp control error: %s", ex)
 
@@ -509,6 +536,24 @@ class GoveeClient:
             if result.get("message") == "Success":
                 _LOGGER.debug("Control success ← %s %s", device.device, command)
                 device.lock_set_until = time.monotonic() + 0.8
+                # Record pending expectation to smooth UI against stale reads/pushes
+                now = time.monotonic()
+                device.pending_until = now + 2.0
+                try:
+                    if command == "brightness":
+                        # value is 0–100; store HA 0–255 for comparison
+                        device.pending_brightness = max(0, min(255, int(round(int(value) / 100 * 255))))
+                    elif command == "color":
+                        device.pending_color = (int(value.get("r",0)), int(value.get("g",0)), int(value.get("b",0)))
+                        device.pending_ct = 0
+                    elif command == "colorTem":
+                        device.pending_ct = int(value)
+                        device.pending_color = (0,0,0)
+                    elif command == "turn":
+                        # no specific value to record here
+                        pass
+                except Exception:
+                    pass
                 # Schedule a reconciliatory state fetch shortly after
                 self._schedule_post_control_poll(device.device)
                 return True, None
@@ -607,6 +652,7 @@ class GoveeClient:
             # Collect values first, then enforce exclusivity
             new_color = None
             new_ct = None
+            new_brightness = None
             for p in props:
                 # Some properties objects don’t have "online"
                 if "online" in p and p["online"] is False:
@@ -621,7 +667,7 @@ class GoveeClient:
                         gv = int(p["brightness"])
                     except Exception:
                         gv = 0
-                    dev.brightness = max(0, min(255, int(round(gv / 100 * 255))))
+                    new_brightness = max(0, min(255, int(round(gv / 100 * 255))))
                 if "color" in p:
                     c = p["color"]
                     new_color = (c.get("r", 0), c.get("g", 0), c.get("b", 0))
@@ -647,21 +693,48 @@ class GoveeClient:
                     except Exception:
                         pass
 
+            # Apply brightness with pending reconciliation
+            if new_brightness is not None:
+                now_mono = time.monotonic()
+                if now_mono < getattr(dev, "pending_until", 0.0) and dev.pending_brightness is not None:
+                    if int(new_brightness) == int(dev.pending_brightness):
+                        dev.brightness = int(new_brightness)
+                        dev.pending_brightness = None
+                    else:
+                        # ignore stale brightness
+                        pass
+                else:
+                    dev.brightness = int(new_brightness)
+
             # Enforce mutual exclusivity with preference for RGB if present
             now_mono = time.monotonic()
+            # Brightness pending reconciliation
+            # (brightness arrives as separate field in some payloads; handled above)
+
+            # Color reconciliation with pending expectation
             if new_color and any(new_color):
-                # Avoid immediate flip to color if we just set CT locally
-                if now_mono < getattr(dev, "lock_set_until", 0.0) and getattr(dev, "color_temp", 0) > 0:
-                    pass
+                if now_mono < getattr(dev, "pending_until", 0.0) and dev.pending_color is not None:
+                    if tuple(new_color) != tuple(dev.pending_color):
+                        # Ignore stale color
+                        pass
+                    else:
+                        dev.color = (new_color[0], new_color[1], new_color[2])
+                        dev.color_temp = 0
+                        dev.pending_color = None
                 else:
                     dev.color = (new_color[0], new_color[1], new_color[2])
                     dev.color_temp = 0
             elif new_ct and new_ct > 0:
-                # If we just set a color locally, avoid immediate flip to CT
-                if now_mono < getattr(dev, "lock_set_until", 0.0) and any(getattr(dev, "color", (0,0,0))):
-                    pass
+                if now_mono < getattr(dev, "pending_until", 0.0) and dev.pending_ct is not None:
+                    if int(new_ct) != int(dev.pending_ct):
+                        # Ignore stale CT
+                        pass
+                    else:
+                        dev.color_temp = int(new_ct)
+                        dev.color = (0, 0, 0)
+                        dev.pending_ct = None
                 else:
-                    dev.color_temp = new_ct
+                    dev.color_temp = int(new_ct)
                     dev.color = (0, 0, 0)
             dev.online = True
 

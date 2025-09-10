@@ -224,11 +224,21 @@ class GoveeIoTClient:
                     dev.power_state = bool(int(state.get("onOff") or 0))
                 except Exception:
                     pass
-            # brightness 0-100 -> 0-255
+            # brightness 0-100 -> 0-255 (respect pending expectation)
             if "brightness" in state:
                 try:
                     gv = int(state.get("brightness") or 0)
-                    dev.brightness = max(0, min(255, int(round(gv / 100 * 255))))
+                    hb = max(0, min(255, int(round(gv / 100 * 255))))
+                    now_mono = __import__("time").monotonic()
+                    if now_mono < getattr(dev, "pending_until", 0.0) and dev.pending_brightness is not None:
+                        if int(hb) == int(dev.pending_brightness):
+                            dev.brightness = hb
+                            dev.pending_brightness = None
+                        else:
+                            # ignore stale brightness
+                            pass
+                    else:
+                        dev.brightness = hb
                 except Exception:
                     pass
             # Collect potential color/ct values first
@@ -247,18 +257,30 @@ class GoveeIoTClient:
             import time as _t
             now_mono = _t.monotonic()
             if new_color and any(new_color):
-                # Avoid immediate flip to color if we just set CT locally
-                if now_mono < getattr(dev, "lock_set_until", 0.0) and getattr(dev, "color_temp", 0) > 0:
-                    pass
+                # Respect pending color expectation if present
+                if now_mono < getattr(dev, "pending_until", 0.0) and dev.pending_color is not None:
+                    if tuple(new_color) == tuple(dev.pending_color):
+                        dev.color = new_color
+                        dev.color_temp = 0
+                        dev.pending_color = None
+                    else:
+                        # ignore stale color
+                        pass
                 else:
                     dev.color = new_color
                     dev.color_temp = 0
             elif new_ct and new_ct > 0:
-                # Avoid immediate flip to CT if we just set color locally
-                if now_mono < getattr(dev, "lock_set_until", 0.0) and any(getattr(dev, "color", (0,0,0))):
-                    pass  # ignore stale CT right after a local color change
+                # Respect pending CT expectation if present
+                if now_mono < getattr(dev, "pending_until", 0.0) and dev.pending_ct is not None:
+                    if int(new_ct) == int(dev.pending_ct):
+                        dev.color_temp = int(new_ct)
+                        dev.color = (0, 0, 0)
+                        dev.pending_ct = None
+                    else:
+                        # ignore stale CT
+                        pass
                 else:
-                    dev.color_temp = new_ct
+                    dev.color_temp = int(new_ct)
                     dev.color = (0, 0, 0)
             # Push into coordinator if present
             entry_data = self._hass.data.get(DOMAIN, {}).get(self._entry.entry_id)

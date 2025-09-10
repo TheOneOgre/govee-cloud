@@ -50,6 +50,11 @@ class GoveeDevice:
     # Lightweight throttle windows (monotonic seconds)
     lock_set_until: float = 0.0
     lock_get_until: float = 0.0
+    # Pending state expectation (optimistic update reconciliation)
+    pending_until: float = 0.0
+    pending_color: Optional[Tuple[int, int, int]] = None
+    pending_brightness: Optional[int] = None
+    pending_ct: Optional[int] = None
     # Last time we attempted CT range learning
     last_ct_learn_ts: float = 0.0
 

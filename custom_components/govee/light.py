@@ -270,6 +270,14 @@ class GoveeLightEntity(LightEntity):
             if tuple(col) == tuple(dev.color):
                 last_ok = True
             else:
+                # Optimistically mark pending to avoid UI flicker on stale reads
+                try:
+                    import time as _t
+                    dev.pending_until = _t.monotonic() + 2.0
+                    dev.pending_color = (int(col[0]), int(col[1]), int(col[2]))
+                    dev.pending_ct = 0
+                except Exception:
+                    pass
                 ok, err = await self._hub.set_color(dev, col)
                 last_ok, last_err = ok, err
                 if ok or (err and isinstance(err, str) and err.startswith("Rate limit")):
@@ -303,6 +311,14 @@ class GoveeLightEntity(LightEntity):
             if dev.color_temp == color_temp:
                 last_ok = True
             else:
+                # Optimistically mark pending CT
+                try:
+                    import time as _t
+                    dev.pending_until = _t.monotonic() + 2.0
+                    dev.pending_ct = int(color_temp)
+                    dev.pending_color = (0,0,0)
+                except Exception:
+                    pass
                 ok, err = await self._hub.set_color_temp(dev, color_temp)
                 last_ok, last_err = ok, err
                 if ok or (err and isinstance(err, str) and err.startswith("Rate limit")):
@@ -317,6 +333,13 @@ class GoveeLightEntity(LightEntity):
             if dev.brightness == ha_bright:
                 ok, err = True, None
             else:
+                # Optimistically mark pending brightness
+                try:
+                    import time as _t
+                    dev.pending_until = _t.monotonic() + 2.0
+                    dev.pending_brightness = int(ha_bright)
+                except Exception:
+                    pass
                 ok, err = await self._hub.set_brightness(dev, ha_bright)
             if ok or (err and isinstance(err, str) and err.startswith("Rate limit")):
                 dev.brightness = ha_bright
