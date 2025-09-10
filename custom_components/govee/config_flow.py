@@ -127,6 +127,7 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
     def __init__(self, config_entry):
         self.config_entry = config_entry
         self.options = dict(config_entry.options)
+        self._pending_options: dict | None = None
 
     async def async_step_init(self, user_input=None):
         return await self.async_step_user(user_input)
@@ -152,6 +153,15 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
                 errors["base"] = "unknown"
 
             if not errors:
+                # If IoT push has been enabled but credentials are missing,
+                # collect them in a follow-up step.
+                if user_input.get(CONF_IOT_PUSH_ENABLED):
+                    email = user_input.get(CONF_IOT_EMAIL) or self.config_entry.options.get(CONF_IOT_EMAIL, "")
+                    password = user_input.get(CONF_IOT_PASSWORD) or self.config_entry.options.get(CONF_IOT_PASSWORD, "")
+                    if not email or not password:
+                        self._pending_options = dict(self.options)
+                        self._pending_options.update(user_input)
+                        return await self.async_step_iot()
                 self.options.update(user_input)
                 return self.async_create_entry(title="Govee", data=self.options)
 
@@ -204,6 +214,10 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_iot(self, user_input=None):
         errors = {}
         if user_input is not None:
+            # Merge pending options first, if present
+            if self._pending_options is not None:
+                self.options.update(self._pending_options)
+                self._pending_options = None
             self.options.update(user_input)
             return self.async_create_entry(title="Govee", data=self.options)
         iot_schema = vol.Schema(
