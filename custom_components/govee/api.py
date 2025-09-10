@@ -589,13 +589,17 @@ class GoveeClient:
                     dev.brightness = max(0, min(255, int(round(gv / 100 * 255))))
                 if "color" in p:
                     c = p["color"]
-                    dev.color = (c["r"], c["g"], c["b"])
+                    # When device reports RGB, CT is inactive
+                    dev.color = (c.get("r", 0), c.get("g", 0), c.get("b", 0))
+                    dev.color_temp = 0
                 if "colorTemInKelvin" in p:
                     dev.color_temp = int(p["colorTemInKelvin"]) or 0
+                    dev.color = (0, 0, 0)
                 elif "colorTemperatureK" in p:
                     # Some schemas might return this key
                     try:
                         dev.color_temp = int(p["colorTemperatureK"]) or 0
+                        dev.color = (0, 0, 0)
                     except Exception:
                         pass
                 elif "colorTem" in p:
@@ -607,6 +611,7 @@ class GoveeClient:
                         width = max(1, (vmax - vmin))
                         pct = max(0, min(100, pct))
                         dev.color_temp = int(round(vmin + (pct * width / 100)))
+                        dev.color = (0, 0, 0)
                     except Exception:
                         pass
             dev.online = True

@@ -78,6 +78,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     # Prime the coordinator with that data
     coordinator.data = devices
+    # Expose coordinator for IoT push updates to call async_set_updated_data
+    entry_data = hass.data[DOMAIN].get(entry.entry_id) or hass.data[DOMAIN]
+    entry_data["coordinator"] = coordinator
 
 
     # Register light entities with fresh data

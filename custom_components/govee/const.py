@@ -11,3 +11,8 @@ CONF_USE_ASSUMED_STATE = "use_assumed_state"
 COLOR_TEMP_KELVIN_MIN = 2700
 COLOR_TEMP_KELVIN_MAX = 9000
 CONF_POLLING_MODE = "polling_mode"
+
+# IoT (AWS MQTT) push updates options
+CONF_IOT_EMAIL = "iot_email"
+CONF_IOT_PASSWORD = "iot_password"
+CONF_IOT_PUSH_ENABLED = "enable_iot_push"

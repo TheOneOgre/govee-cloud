@@ -12,6 +12,9 @@ from .const import (
     CONF_DISABLE_ATTRIBUTE_UPDATES,
     CONF_OFFLINE_IS_OFF,
     CONF_USE_ASSUMED_STATE,
+    CONF_IOT_EMAIL,
+    CONF_IOT_PASSWORD,
+    CONF_IOT_PUSH_ENABLED,
     DOMAIN,
 )
 
@@ -74,6 +77,9 @@ class GoveeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(CONF_API_KEY): cv.string,
                     vol.Optional(CONF_DELAY, default=10): cv.positive_int,
+                    vol.Optional(CONF_IOT_EMAIL, default=""): cv.string,
+                    vol.Optional(CONF_IOT_PASSWORD, default=""): cv.string,
+                    vol.Optional(CONF_IOT_PUSH_ENABLED, default=True): cv.boolean,
                 }
             ),
             errors=errors,
@@ -143,6 +149,18 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_DISABLE_ATTRIBUTE_UPDATES,
                     default=self.config_entry.options.get(CONF_DISABLE_ATTRIBUTE_UPDATES, ""),
                 ): cv.string,
+                vol.Optional(
+                    CONF_IOT_EMAIL,
+                    default=self.config_entry.options.get(CONF_IOT_EMAIL, ""),
+                ): cv.string,
+                vol.Optional(
+                    CONF_IOT_PASSWORD,
+                    default=self.config_entry.options.get(CONF_IOT_PASSWORD, ""),
+                ): cv.string,
+                vol.Required(
+                    CONF_IOT_PUSH_ENABLED,
+                    default=self.config_entry.options.get(CONF_IOT_PUSH_ENABLED, False),
+                ): cv.boolean,
             }
         )
 

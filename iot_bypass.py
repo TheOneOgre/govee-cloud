@@ -190,6 +190,10 @@ def on_message(client: Client, userdata, msg: MQTTMessage):
         print(f"[MQTT] {msg.topic}: <{len(msg.payload)} bytes>")
 
 
+def on_publish(client: Client, userdata, mid):
+    print(f"[MQTT] publish ack mid={mid}")
+
+
 def publish_turn(client: Client, device_topic: str, on: bool):
     val = 1 if on else 0
     payload = {
@@ -201,7 +205,9 @@ def publish_turn(client: Client, device_topic: str, on: bool):
             "type": 1,
         }
     }
-    client.publish(device_topic, json.dumps(payload), qos=0, retain=False)
+    print(f"Publishing TURN → {device_topic}: {payload}")
+    info = client.publish(device_topic, json.dumps(payload), qos=1, retain=False)
+    info.wait_for_publish()
 
 
 def publish_status_request(client: Client, device_topic: str):
@@ -255,7 +261,9 @@ def publish_brightness(client: Client, device_topic: str, percent: int):
             "type": 1,
         }
     }
-    client.publish(device_topic, json.dumps(payload), qos=0, retain=False)
+    print(f"Publishing BRIGHTNESS → {device_topic}: {payload}")
+    info = client.publish(device_topic, json.dumps(payload), qos=1, retain=False)
+    info.wait_for_publish()
 
 
 def publish_ct(client: Client, device_topic: str, kelvin: int):
@@ -268,7 +276,9 @@ def publish_ct(client: Client, device_topic: str, kelvin: int):
             "type": 1,
         }
     }
-    client.publish(device_topic, json.dumps(payload), qos=0, retain=False)
+    print(f"Publishing CT → {device_topic}: {payload}")
+    info = client.publish(device_topic, json.dumps(payload), qos=1, retain=False)
+    info.wait_for_publish()
 
 
 def publish_color(client: Client, device_topic: str, r: int, g: int, b: int):
@@ -281,7 +291,9 @@ def publish_color(client: Client, device_topic: str, r: int, g: int, b: int):
             "type": 1,
         }
     }
-    client.publish(device_topic, json.dumps(payload), qos=0, retain=False)
+    print(f"Publishing COLOR → {device_topic}: {payload}")
+    info = client.publish(device_topic, json.dumps(payload), qos=1, retain=False)
+    info.wait_for_publish()
 
 
 def main():
@@ -346,6 +358,7 @@ def main():
     mqtt_client = Client(client_id=f"AP/{account_id}/{uuid.uuid4().hex}", clean_session=True)
     mqtt_client.tls_set_context(ctx)
     mqtt_client.on_connect = on_connect
+    mqtt_client.on_publish = on_publish
     if args.subscribe and account_topic:
         mqtt_client.on_message = on_message
 
