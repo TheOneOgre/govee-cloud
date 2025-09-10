@@ -182,6 +182,15 @@ class GoveeClient:
             # Limited retry loop for 429s
             attempts = 0
             while True:
+                # Gate each retry by token bucket as well
+                while True:
+                    wait = self._bucket_take(dev_id, 1.0)
+                    if wait <= 0:
+                        break
+                    try:
+                        await asyncio.sleep(wait)
+                    except asyncio.CancelledError:
+                        raise
                 ok, err = await self._control(device, command, v)
                 if ok:
                     self._last_sent[key] = (v, time.monotonic())
@@ -195,7 +204,9 @@ class GoveeClient:
                 sleep_s = 6.0
                 try:
                     part = err.split("in ")[-1].rstrip("s")
-                    sleep_s = max(1.0, float(part))
+                    # If server says 0s, still wait a safe window (6s)
+                    parsed = float(part)
+                    sleep_s = 6.0 if parsed <= 0.5 else parsed
                 except Exception:
                     pass
                 try:
