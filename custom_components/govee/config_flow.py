@@ -56,6 +56,9 @@ class GoveeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
     CONNECTION_CLASS = config_entries.CONN_CLASS_CLOUD_POLL
 
+    def __init__(self):
+        self._pending_config: dict | None = None
+
     async def async_step_user(self, user_input=None):
         """Handle the initial step."""
         errors = {}
@@ -70,6 +73,10 @@ class GoveeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "unknown"
 
             if not errors:
+                # If IoT push is enabled, collect credentials next
+                if user_input.get(CONF_IOT_PUSH_ENABLED):
+                    self._pending_config = dict(user_input)
+                    return await self.async_step_iot()
                 return self.async_create_entry(title="Govee", data=user_input)
 
         # Step 1: basic + toggles
@@ -85,6 +92,25 @@ class GoveeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
         )
+
+    async def async_step_iot(self, user_input=None):
+        """Collect IoT credentials when IoT push is enabled."""
+        if self._pending_config is None:
+            # Safety: go back to user step
+            return await self.async_step_user()
+        errors = {}
+        if user_input is not None:
+            data = dict(self._pending_config)
+            data.update(user_input)
+            return self.async_create_entry(title="Govee", data=data)
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_IOT_EMAIL, default=""): cv.string,
+                vol.Required(CONF_IOT_PASSWORD, default=""): cv.string,
+            }
+        )
+        return self.async_show_form(step_id="iot", data_schema=schema, errors=errors)
 
     @staticmethod
     @callback
