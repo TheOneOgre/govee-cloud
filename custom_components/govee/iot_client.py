@@ -25,6 +25,11 @@ _LOGGER = logging.getLogger(__name__)
 
 APP_VERSION = "5.6.01"
 
+# Lightweight in-process caches to avoid excessive logins
+_APP_LOGIN_CACHE: dict[str, tuple[dict, float]] = {}
+_IOT_KEY_CACHE: dict[str, tuple[dict, float]] = {}
+_CACHE_TTL_SEC = 6 * 60 * 60  # 6 hours
+
 
 def _ua() -> str:
     return (
@@ -111,12 +116,30 @@ class GoveeIoTClient:
         loop = asyncio.get_running_loop()
         # Login and fetch IoT key in executor
         try:
-            acct = await loop.run_in_executor(None, _login, email, password)
-            token = acct.get("token") or acct.get("accessToken")
-            if not token:
-                _LOGGER.warning("Govee IoT: no token from login response")
-                return
-            iot = await loop.run_in_executor(None, _get_iot_key, token, email)
+            now = time.monotonic()
+            token: str | None = None
+            acct: dict[str, Any] | None = None
+            # Use cached app login token if fresh
+            cached = _APP_LOGIN_CACHE.get(email)
+            if cached and (now - cached[1]) < _CACHE_TTL_SEC:
+                acct = cached[0]
+                token = acct.get("token") or acct.get("accessToken")
+            else:
+                acct = await loop.run_in_executor(None, _login, email, password)
+                token = acct.get("token") or acct.get("accessToken")
+                if not token:
+                    _LOGGER.warning("Govee IoT: no token from login response")
+                    return
+                _APP_LOGIN_CACHE[email] = (acct, now)
+
+            # Use cached IoT key if fresh
+            iot: dict[str, Any]
+            iot_cached = _IOT_KEY_CACHE.get(email)
+            if iot_cached and (now - iot_cached[1]) < _CACHE_TTL_SEC:
+                iot = iot_cached[0]
+            else:
+                iot = await loop.run_in_executor(None, _get_iot_key, token, email)
+                _IOT_KEY_CACHE[email] = (iot, now)
             endpoint = iot.get("endpoint")
             p12_pass = iot.get("p12Pass") or iot.get("p12_pass")
             key_pem, cert_pem = await loop.run_in_executor(

@@ -487,13 +487,12 @@ class GoveeClient:
                     if command == "turn":
                         ok = await self._platform_app.control_turn(device.model, device.device, value == "on")
                         if ok:
-                            # Set pending expectation
                             now = time.monotonic()
                             device.pending_until = now + 2.0
-                            # Power only; no value field
                             return True, None
-                        return False, "PlatformApp turn failed"
-                    if command == "brightness":
+                        else:
+                            _LOGGER.debug("PlatformApp turn failed; falling back to Developer API")
+                    elif command == "brightness":
                         ok = await self._platform_app.control_brightness(device.model, device.device, int(value))
                         if ok:
                             now = time.monotonic()
@@ -504,27 +503,48 @@ class GoveeClient:
                                 ha_val = None
                             device.pending_brightness = ha_val
                             return True, None
-                        return False, "PlatformApp brightness failed"
-                    if command == "color":
-                        ok = await self._platform_app.control_colorwc(device.model, device.device, r=value.get("r",0), g=value.get("g",0), b=value.get("b",0), kelvin=0)
+                        else:
+                            _LOGGER.debug("PlatformApp brightness failed; falling back to Developer API")
+                    elif command == "color":
+                        ok = await self._platform_app.control_colorwc(
+                            device.model,
+                            device.device,
+                            r=value.get("r", 0),
+                            g=value.get("g", 0),
+                            b=value.get("b", 0),
+                            kelvin=0,
+                        )
                         if ok:
                             now = time.monotonic()
                             device.pending_until = now + 2.0
-                            device.pending_color = (int(value.get("r",0)), int(value.get("g",0)), int(value.get("b",0)))
+                            device.pending_color = (
+                                int(value.get("r", 0)),
+                                int(value.get("g", 0)),
+                                int(value.get("b", 0)),
+                            )
                             device.pending_ct = 0
                             return True, None
-                        return False, "PlatformApp color failed"
-                    if command == "colorTem":
-                        ok = await self._platform_app.control_colorwc(device.model, device.device, r=0,g=0,b=0, kelvin=int(value))
+                        else:
+                            _LOGGER.debug("PlatformApp color failed; falling back to Developer API")
+                    elif command == "colorTem":
+                        ok = await self._platform_app.control_colorwc(
+                            device.model,
+                            device.device,
+                            r=0,
+                            g=0,
+                            b=0,
+                            kelvin=int(value),
+                        )
                         if ok:
                             now = time.monotonic()
                             device.pending_until = now + 2.0
                             device.pending_ct = int(value)
-                            device.pending_color = (0,0,0)
+                            device.pending_color = (0, 0, 0)
                             return True, None
-                        return False, "PlatformApp colorTem failed"
+                        else:
+                            _LOGGER.debug("PlatformApp colorTem failed; falling back to Developer API")
                 except Exception as ex:
-                    _LOGGER.debug("PlatformApp control error: %s", ex)
+                    _LOGGER.debug("PlatformApp control error: %s. Falling back to Developer API", ex)
 
             await self._rate_limit_delay()
         async with self._session.put(_API_CONTROL, headers=self._headers(), json=payload) as resp:
