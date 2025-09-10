@@ -96,6 +96,7 @@ class GoveeIoTClient:
         self._entry = entry
         self._hub = hub
         self._iot: IoTState | None = None
+        self._last_reconcile: dict[str, float] = {}
 
     async def start(self):
         opts = self._entry.options
@@ -162,15 +163,12 @@ class GoveeIoTClient:
         client.on_connect = on_connect
         client.on_message = on_message
 
-        def _run():
-            try:
-                client.connect(endpoint, 8883, keepalive=120)
-                client.loop_forever()
-            except Exception as ex:
-                _LOGGER.warning("Govee IoT loop ended: %s", ex)
-
-        # Run MQTT in executor thread
-        self._hass.async_create_background_task(asyncio.to_thread(_run), "govee_iot_loop")
+        try:
+            # Async connect and background loop for lower-latency callbacks
+            client.connect_async(endpoint, 8883, keepalive=120)
+            client.loop_start()
+        except Exception as ex:
+            _LOGGER.warning("Govee IoT connect failed: %s", ex)
 
     def _schedule_state_update(self, device_id: str, state: Dict[str, Any]):
         async def _apply():
@@ -207,7 +205,30 @@ class GoveeIoTClient:
                 coord = entry_data["coordinator"]
                 coord.async_set_updated_data(list(self._hub._devices.values()))
 
-        self._hass.async_create_task(_apply())
+            # Optional fast reconcile: fetch full state shortly after GA update
+            # to ensure UI reflects any backend-only fields. Throttle per device.
+            import time as _t
+            now = _t.time()
+            last = self._last_reconcile.get(device_id, 0.0)
+            if now - last > 5.0:
+                self._last_reconcile[device_id] = now
+                async def _reconcile():
+                    try:
+                        await asyncio.sleep(0.6)
+                        await self._hub.get_device_state(device_id)
+                        # propagate again
+                        if entry_data and "coordinator" in entry_data:
+                            entry_data["coordinator"].async_set_updated_data(list(self._hub._devices.values()))
+                    except Exception:
+                        pass
+                self._hass.async_create_task(_reconcile())
+
+        # Schedule coroutine on HA's event loop thread-safely
+        try:
+            self._hass.loop.call_soon_threadsafe(self._hass.async_create_task, _apply())
+        except Exception:
+            # Fallback in case loop call fails (shouldn't on HA)
+            asyncio.run_coroutine_threadsafe(_apply(), self._hass.loop)
 
     async def stop(self):
         if self._iot and self._iot.mqtt:
