@@ -1,12 +1,12 @@
 """Config flow for Govee integration."""
 
 import logging
-import voluptuous as vol
+import voluptuous as vol # pyright: ignore[reportMissingImports]
 
-from homeassistant import config_entries, core, exceptions
-import homeassistant.helpers.config_validation as cv
-from homeassistant.const import CONF_DELAY
-from homeassistant.core import callback
+from homeassistant import config_entries, core, exceptions  # type: ignore
+import homeassistant.helpers.config_validation as cv  # type: ignore
+from homeassistant.const import CONF_DELAY  # type: ignore
+from homeassistant.core import callback  # type: ignore
 
 from .const import (
     CONF_OFFLINE_IS_OFF,
@@ -19,7 +19,7 @@ from .const import (
 )
 
 from .api import GoveeClient
-from .learning_storage import GoveeLearningStorage
+from .learning_storage import GoveeLearningStorage # pyright: ignore[reportMissingImports]
 
 
 

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Tuple, Union
 
 from .models import GoveeDevice, GoveeSource, GoveeLearnedInfo
 from .const import CONF_IOT_EMAIL, CONF_IOT_PASSWORD
+from .iot_client import APP_VERSION, _ua
 from .quirks import resolve_quirk
 
 _LOGGER = logging.getLogger(__name__)
@@ -251,188 +252,229 @@ class GoveeClient:
         return ok, err
 
     async def get_devices(self) -> Tuple[List[GoveeDevice], str | None]:
-        await self._rate_limit_delay()
-        async with self._session.get(_API_DEVICES, headers=self._headers()) as resp:
-            self._track_rate_limit(resp)
-            if resp.status != 200:
-                return [], f"API error {resp.status}: {await resp.text()}"
-            data = await resp.json()
-            if "data" not in data:
-                return [], "Malformed API response"
+        """Discover devices via mobile (app) API using IoT credentials."""
+        if not self._config_entry:
+            return [], "Missing config entry"
+        email = self._config_entry.options.get(CONF_IOT_EMAIL)
+        password = self._config_entry.options.get(CONF_IOT_PASSWORD)
+        if not email or not password:
+            return [], "IoT credentials not configured"
 
-            # Support both standard and alternate schemas
-            raw = data.get("data")
-            if isinstance(raw, dict) and "devices" in raw:
-                items = raw["devices"]
-            elif isinstance(raw, list):
-                items = raw
-            else:
-                return [], "Malformed API response"
+        def _login_and_list():
+            import requests, uuid, time as _t
+            def _client_id(em: str) -> str:
+                return uuid.uuid5(uuid.NAMESPACE_DNS, em).hex
+            # Login to app backend
+            r = requests.post(
+                "https://app2.govee.com/account/rest/account/v1/login",
+                json={"email": email, "password": password, "client": _client_id(email)},
+                timeout=30,
+            )
+            r.raise_for_status()
+            jd = r.json()
+            client = jd.get("client") or jd.get("data") or jd
+            token = client.get("token") or client.get("accessToken")
+            if not token:
+                raise RuntimeError("No token from login")
+            # Device list
+            h = {
+                "Authorization": f"Bearer {token}",
+                "appVersion": APP_VERSION,
+                "clientId": _client_id(email),
+                "clientType": "1",
+                "iotVersion": "0",
+                "timestamp": str(int(_t.time() * 1000)),
+                "User-Agent": _ua(),
+            }
+            dl = requests.post("https://app2.govee.com/device/rest/devices/v1/list", headers=h, timeout=30)
+            dl.raise_for_status()
+            return dl.json()
 
-            timestamp = int(time.time())
-            learning_infos = await self._storage.read()
+        try:
+            data = await asyncio.get_running_loop().run_in_executor(None, _login_and_list)
+        except Exception as ex:
+            return [], f"Mobile list failed: {ex}"
 
-            _LOGGER.debug("Discovered %s devices from Govee API", len(items))
-            for item in items:
-                dev_id = item["device"]
-                if dev_id in self._devices:
-                    continue
-                learned = learning_infos.get(dev_id, GoveeLearnedInfo())
-                # Try to parse color temperature capability range from device list
-                ct_min = None
-                ct_max = None
-                ct_step = 1
+        # Extract items from either {devices:[...]} or {data:{devices:[...]}}
+        items = []
+        if isinstance(data, dict):
+            if isinstance(data.get("devices"), list):
+                items = data["devices"]
+            elif isinstance(data.get("data"), dict) and isinstance(data["data"].get("devices"), list):
+                items = data["data"]["devices"]
+        if not items:
+            return [], "Malformed device list"
 
-                def _parse_range_dict(r):
-                    nonlocal ct_min, ct_max, ct_step
-                    if not isinstance(r, dict):
-                        return
-                    try:
-                        if r.get("min") is not None:
-                            ct_min = int(r.get("min"))
-                        if r.get("max") is not None:
-                            ct_max = int(r.get("max"))
-                        inc = (
-                            r.get("step")
-                            or r.get("inc")
-                            or r.get("increment")
-                            or r.get("precision")
-                        )
-                        if inc is not None:
-                            ct_step = int(inc)
-                    except Exception:
-                        # Ignore parsing errors; leave defaults
-                        pass
+        timestamp = int(time.time())
+        learning_infos = await self._storage.read()
 
-                props = item.get("properties") or item.get("capabilities") or []
+        _LOGGER.debug("Discovered %s devices from Govee Mobile API", len(items))
+        for item in items:
+            dev_id = item["device"]
+            if dev_id in self._devices:
+                continue
+            learned = learning_infos.get(dev_id, GoveeLearnedInfo())
+            # Try to parse color temperature capability range from device list
+            ct_min = None
+            ct_max = None
+            ct_step = 1
 
-                # Case A: list of capability dicts (e.g., instance=colorTemperatureK)
-                if isinstance(props, list):
-                    for p in props:
-                        typ = (p.get("type") or p.get("name") or "").lower()
-                        inst = (p.get("instance") or "").lower()
-                        # Match common representations of color temperature capability
-                        if (
-                            "colortem" in typ
-                            or "color_temp" in typ
-                            or ("color_setting" in typ and "colortemperature" in inst)
-                            or inst in {"colortemperaturek", "color_temperature_k", "colortemperatur"}
-                        ):
-                            if isinstance(p.get("parameters"), dict):
-                                _parse_range_dict(p["parameters"].get("range"))
-                            # Some variants put range at top-level under different keys
-                            _parse_range_dict(p.get("range") or p.get("value") or p.get("values"))
+            def _parse_range_dict(r):
+                nonlocal ct_min, ct_max, ct_step
+                if not isinstance(r, dict):
+                    return
+                try:
+                    if r.get("min") is not None:
+                        ct_min = int(r.get("min"))
+                    if r.get("max") is not None:
+                        ct_max = int(r.get("max"))
+                    inc = (
+                        r.get("step")
+                        or r.get("inc")
+                        or r.get("increment")
+                        or r.get("precision")
+                    )
+                    if inc is not None:
+                        ct_step = int(inc)
+                except Exception:
+                    # Ignore parsing errors; leave defaults
+                    pass
 
-                # Case B: dict of properties, e.g. {"colorTem": {"range": {...}}}
-                elif isinstance(props, dict):
-                    # Check a few likely keys
-                    for key in [
-                        "colorTem",
-                        "color_temperature_k",
-                        "colorTemperatureK",
-                        "colorTemperature",
-                        "ct",
-                    ]:
-                        if key in props and isinstance(props[key], dict):
-                            _parse_range_dict(props[key].get("range"))
+            props = item.get("properties") or item.get("capabilities") or []
 
-                support_cmds = item.get("supportCmds", [])
-                # Apply model-specific quirks if known
-                model = item.get("model") or item.get("sku") or item.get("type") or "unknown"
-                quirk = resolve_quirk(model) if model else None
-                if quirk and quirk.color_temp_range:
-                    qmin, qmax = quirk.color_temp_range
-                    if ct_min is None:
-                        ct_min = int(qmin)
-                    if ct_max is None:
-                        ct_max = int(qmax)
+            # Case A: list of capability dicts (e.g., instance=colorTemperatureK)
+            if isinstance(props, list):
+                for p in props:
+                    typ = (p.get("type") or p.get("name") or "").lower()
+                    inst = (p.get("instance") or "").lower()
+                    # Match common representations of color temperature capability
+                    if (
+                        "colortem" in typ
+                        or "color_temp" in typ
+                        or ("color_setting" in typ and "colortemperature" in inst)
+                        or inst in {"colortemperaturek", "color_temperature_k", "colortemperatur"}
+                    ):
+                        if isinstance(p.get("parameters"), dict):
+                            _parse_range_dict(p["parameters"].get("range"))
+                        # Some variants put range at top-level under different keys
+                        _parse_range_dict(p.get("range") or p.get("value") or p.get("values"))
 
-                # Derive support flags from capabilities if supportCmds is missing/empty
-                derived_turn = False
-                derived_brightness = False
-                derived_color = False
-                derived_ct = False
-                if isinstance(props, list):
-                    for p in props:
-                        inst = (p.get("instance") or "").lower()
-                        typ = (p.get("type") or p.get("name") or "").lower()
-                        if inst in {"powerswitch", "light"} or "power" in inst or "turn" in typ:
-                            derived_turn = True
-                        if inst == "brightness":
-                            derived_brightness = True
-                        if inst == "colorrgb" or "color" in inst:
-                            derived_color = True
-                        if inst in {"colortemperaturek", "color_temperature_k"} or "colortem" in inst:
-                            derived_ct = True
-                elif isinstance(props, dict):
-                    # Some responses present a dict of instances
-                    keys = {k.lower() for k in props.keys()}
-                    if {"powerswitch", "power", "turn"} & keys:
+            # Case B: dict of properties, e.g. {"colorTem": {"range": {...}}}
+            elif isinstance(props, dict):
+                # Check a few likely keys
+                for key in [
+                    "colorTem",
+                    "color_temperature_k",
+                    "colorTemperatureK",
+                    "colorTemperature",
+                    "ct",
+                ]:
+                    if key in props and isinstance(props[key], dict):
+                        _parse_range_dict(props[key].get("range"))
+
+            support_cmds = item.get("supportCmds", [])
+            # Apply model-specific quirks if known
+            model = item.get("model") or item.get("sku") or item.get("type") or "unknown"
+            quirk = resolve_quirk(model) if model else None
+            if quirk and quirk.color_temp_range:
+                qmin, qmax = quirk.color_temp_range
+                if ct_min is None:
+                    ct_min = int(qmin)
+                if ct_max is None:
+                    ct_max = int(qmax)
+
+            # Derive support flags from capabilities if supportCmds is missing/empty
+            derived_turn = False
+            derived_brightness = False
+            derived_color = False
+            derived_ct = False
+            if isinstance(props, list):
+                for p in props:
+                    inst = (p.get("instance") or "").lower()
+                    typ = (p.get("type") or p.get("name") or "").lower()
+                    if inst in {"powerswitch", "light"} or "power" in inst or "turn" in typ:
                         derived_turn = True
-                    if "brightness" in keys:
+                    if inst == "brightness":
                         derived_brightness = True
-                    if {"colorrgb", "color"} & keys:
+                    if inst == "colorrgb" or "color" in inst:
                         derived_color = True
-                    if {"colortemperaturek", "colortem", "color_temperature_k"} & keys:
+                    if inst in {"colortemperaturek", "color_temperature_k"} or "colortem" in inst:
                         derived_ct = True
+            elif isinstance(props, dict):
+                # Some responses present a dict of instances
+                keys = {k.lower() for k in props.keys()}
+                if {"powerswitch", "power", "turn"} & keys:
+                    derived_turn = True
+                if "brightness" in keys:
+                    derived_brightness = True
+                if {"colorrgb", "color"} & keys:
+                    derived_color = True
+                if {"colortemperaturek", "colortem", "color_temperature_k"} & keys:
+                    derived_ct = True
 
-                self._devices[dev_id] = GoveeDevice(
-                    device=dev_id,
-                    model=model,
-                    device_name=item.get("deviceName") or item.get("device_name") or dev_id,
-                    controllable=bool(item.get("controllable", True)),
-                    retrievable=bool(item.get("retrievable", True)),
-                    support_cmds=support_cmds,
-                    support_turn=("turn" in support_cmds) or derived_turn,
-                    support_brightness=("brightness" in support_cmds) or derived_brightness,
-                    support_color=("color" in support_cmds) or derived_color,
-                    # Consider color temp supported if API lists command OR we detected a CT range
-                    support_color_temp=("colorTem" in support_cmds) or derived_ct or (ct_min is not None or ct_max is not None),
-                    color_temp_min=ct_min,
-                    color_temp_max=ct_max,
-                    color_temp_step=ct_step or 1,
-                    lan_api_capable=bool(quirk and quirk.lan_api_capable),
-                    avoid_platform_api=bool(quirk and quirk.avoid_platform_api),
-                    online=True,
-                    timestamp=timestamp,
-                    source=GoveeSource.API,
-                    learned_set_brightness_max=learned.set_brightness_max,
-                    learned_get_brightness_max=learned.get_brightness_max,
-                    before_set_brightness_turn_on=learned.before_set_brightness_turn_on,
-                    config_offline_is_off=learned.config_offline_is_off,
-                    learned_color_temp_min=None,
-                    learned_color_temp_max=None,
-                )
+            self._devices[dev_id] = GoveeDevice(
+                device=dev_id,
+                model=model,
+                device_name=item.get("deviceName") or item.get("device_name") or dev_id,
+                controllable=bool(item.get("controllable", True)),
+                retrievable=bool(item.get("retrievable", True)),
+                support_cmds=support_cmds,
+                support_turn=("turn" in support_cmds) or derived_turn,
+                support_brightness=("brightness" in support_cmds) or derived_brightness,
+                support_color=("color" in support_cmds) or derived_color,
+                # Consider color temp supported if API lists command OR we detected a CT range
+                support_color_temp=("colorTem" in support_cmds) or derived_ct or (ct_min is not None or ct_max is not None),
+                color_temp_min=ct_min,
+                color_temp_max=ct_max,
+                color_temp_step=ct_step or 1,
+                lan_api_capable=bool(quirk and quirk.lan_api_capable),
+                avoid_platform_api=bool(quirk and quirk.avoid_platform_api),
+                online=True,
+                timestamp=timestamp,
+                source=GoveeSource.API,
+                learned_set_brightness_max=learned.set_brightness_max,
+                learned_get_brightness_max=learned.get_brightness_max,
+                before_set_brightness_turn_on=learned.before_set_brightness_turn_on,
+                config_offline_is_off=learned.config_offline_is_off,
+                learned_color_temp_min=None,
+                learned_color_temp_max=None,
+            )
 
-                # Log capabilities to help debug missing devices/models
-                _LOGGER.debug(
-                    "Device %s (%s) controllable=%s retrievable=%s support=%s ct[min=%s max=%s step=%s] quirk[lan=%s avoid_platform=%s]",
-                    dev_id,
-                    model,
-                    item.get("controllable"),
-                    item.get("retrievable"),
-                    ",".join(support_cmds),
-                    ct_min,
-                    ct_max,
-                    ct_step,
-                    bool(quirk and quirk.lan_api_capable),
-                    bool(quirk and quirk.avoid_platform_api),
-                )
+            # Log capabilities to help debug missing devices/models
+            _LOGGER.debug(
+                "Device %s (%s) controllable=%s retrievable=%s support=%s ct[min=%s max=%s step=%s] quirk[lan=%s avoid_platform=%s]",
+                dev_id,
+                model,
+                item.get("controllable"),
+                item.get("retrievable"),
+                ",".join(support_cmds),
+                ct_min,
+                ct_max,
+                ct_step,
+                bool(quirk and quirk.lan_api_capable),
+                bool(quirk and quirk.avoid_platform_api),
+            )
 
-            return list(self._devices.values()), None
+        return list(self._devices.values()), None
 
     async def init_devices(self) -> Tuple[List[GoveeDevice], str | None]:
-        """Discover devices and fetch their initial state."""
+        """Discover devices and request IoT status for initial state."""
         devices, err = await self.get_devices()
         if err:
             return devices, err
-
-        # Fetch live state for each device
-        for dev in devices:
-            ok, state_err = await self.get_device_state(dev.device)
-            if not ok and state_err:
-                _LOGGER.warning("Failed to fetch initial state for %s: %s", dev.device, state_err)
-
+        try:
+            from .const import DOMAIN
+            entry_id = self._config_entry.entry_id if self._config_entry else None
+            iot = self._hass.data.get(DOMAIN, {}).get(entry_id or "", {}).get("iot_client") if (self._hass and entry_id) else None
+            if iot and hasattr(iot, "async_request_status"):
+                for dev in devices:
+                    try:
+                        await iot.async_request_status(dev.device)
+                        await asyncio.sleep(0.05)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         return list(self._devices.values()), None
 
 
@@ -475,8 +517,45 @@ class GoveeClient:
             if now < device.lock_set_until and device.lock_set_until - now < 2.0:
                 await asyncio.sleep(device.lock_set_until - now)
 
-            # Experimental: Try Platform App control first if enabled
-            # Platform App control removed
+            # Preferred: IoT (AWS MQTT) control if enabled and available
+            try:
+                from .const import DOMAIN, CONF_IOT_CONTROL_ENABLED, CONF_IOT_PUSH_ENABLED  # type: ignore
+                if (
+                    self._hass
+                    and self._config_entry
+                    and self._config_entry.options.get(CONF_IOT_PUSH_ENABLED, False)
+                    and self._config_entry.options.get(CONF_IOT_CONTROL_ENABLED, True)
+                ):
+                    entry_id = self._config_entry.entry_id
+                    entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id)
+                    iot = entry_data and entry_data.get("iot_client")
+                    if iot and getattr(iot, "can_control", False):
+                        ok = await iot.async_publish_control(device.device, command, value)
+                        if ok:
+                            # Record pending expectation for UI smoothing
+                            now2 = time.monotonic()
+                            device.lock_set_until = now2 + 0.8
+                            device.pending_until = now2 + 2.0
+                            try:
+                                if command == "brightness":
+                                    device.pending_brightness = max(0, min(255, int(round(int(value) / 100 * 255))))
+                                elif command == "color":
+                                    device.pending_color = (
+                                        int(value.get("r", 0)),
+                                        int(value.get("g", 0)),
+                                        int(value.get("b", 0)),
+                                    )
+                                    device.pending_ct = 0
+                                elif command == "colorTem":
+                                    device.pending_ct = int(value)
+                                    device.pending_color = (0, 0, 0)
+                            except Exception:
+                                pass
+                            # Schedule post-control poll via REST less frequently to reconcile
+                            self._schedule_post_control_poll(device.device)
+                            return True, None
+            except Exception as ex:
+                _LOGGER.debug("IoT control path error: %s", ex)
 
             await self._rate_limit_delay()
         async with self._session.put(_API_CONTROL, headers=self._headers(), json=payload) as resp:
@@ -717,33 +796,3 @@ class GoveeClient:
                 return
 
         asyncio.create_task(runner())
-        # Preferred: IoT (AWS MQTT) control if enabled and available
-        try:
-            from .const import DOMAIN, CONF_IOT_CONTROL_ENABLED, CONF_IOT_PUSH_ENABLED
-            if self._hass and self._config_entry and self._config_entry.options.get(CONF_IOT_PUSH_ENABLED, False) and self._config_entry.options.get(CONF_IOT_CONTROL_ENABLED, True):
-                entry_id = self._config_entry.entry_id
-                entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id)
-                iot = entry_data and entry_data.get("iot_client")
-                if iot and getattr(iot, "can_control", False):
-                    ok = await iot.async_publish_control(device.device, command, value)
-                    if ok:
-                        # Record pending expectation for UI smoothing
-                        now = time.monotonic()
-                        device.lock_set_until = now + 0.8
-                        device.pending_until = now + 2.0
-                        try:
-                            if command == "brightness":
-                                device.pending_brightness = max(0, min(255, int(round(int(value) / 100 * 255))))
-                            elif command == "color":
-                                device.pending_color = (int(value.get("r",0)), int(value.get("g",0)), int(value.get("b",0)))
-                                device.pending_ct = 0
-                            elif command == "colorTem":
-                                device.pending_ct = int(value)
-                                device.pending_color = (0,0,0)
-                        except Exception:
-                            pass
-                        # Schedule post-control poll via REST less frequently to reconcile
-                        self._schedule_post_control_poll(device.device)
-                        return True, None
-        except Exception as ex:
-            _LOGGER.debug("IoT control path error: %s", ex)

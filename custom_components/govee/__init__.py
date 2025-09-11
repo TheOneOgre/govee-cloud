@@ -1,9 +1,8 @@
 """The Govee integration."""
 import logging
 
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_API_KEY  # unused; kept for compatibility
-from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry  # type: ignore
+from homeassistant.core import HomeAssistant  # type: ignore
 
 from .const import DOMAIN, CONF_IOT_EMAIL, CONF_IOT_PASSWORD, CONF_IOT_PUSH_ENABLED
 from .iot_client import GoveeIoTClient
