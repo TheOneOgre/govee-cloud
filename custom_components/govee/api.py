@@ -486,6 +486,14 @@ class GoveeClient:
                         await asyncio.sleep(0.05)
                     except Exception:
                         pass
+            # Debug: log device topics if available
+            if iot and hasattr(iot, "get_topics"):
+                try:
+                    topics = iot.get_topics()
+                    for dev in devices:
+                        _LOGGER.debug("Device topic %s -> %s", dev.device, topics.get(dev.device))
+                except Exception:
+                    pass
         except Exception:
             pass
         return list(self._devices.values()), None

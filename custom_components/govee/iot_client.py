@@ -93,6 +93,7 @@ class IoTState:
     hub: Any
     mqtt: MqttClient | None = None
     stop_event: asyncio.Event | None = None
+    connected_event: asyncio.Event | None = None
     certfile_path: str | None = None
     keyfile_path: str | None = None
 
@@ -107,7 +108,15 @@ class GoveeIoTClient:
         self._device_topics: dict[str, str] = {}
         self._account_topic: str | None = None
         self._token: str | None = None
-        self._email: str | None = None
+        # Seed email from entry immediately for on-demand refreshes
+        try:
+            from .const import CONF_IOT_EMAIL  # type: ignore
+            self._email: str | None = (
+                entry.options.get(CONF_IOT_EMAIL)
+                or entry.data.get(CONF_IOT_EMAIL)
+            )
+        except Exception:
+            self._email = None
 
     async def start(self):
         opts = self._entry.options
@@ -243,11 +252,13 @@ class GoveeIoTClient:
         client = MqttClient(client_id=f"AP/{account_id}/{uuid.uuid4().hex}")
         client.tls_set_context(ctx)
 
+        conn_event = asyncio.Event()
         iot_state = IoTState(
             hass=self._hass,
             entry_id=self._entry.entry_id,
             hub=self._hub,
             mqtt=client,
+            connected_event=conn_event,
             certfile_path=cert_path,
             keyfile_path=key_path,
         )
@@ -267,6 +278,10 @@ class GoveeIoTClient:
 
         def on_connect(_client, _userdata, _flags, rc):
             _LOGGER.info("Govee IoT connected rc=%s", rc)
+            try:
+                conn_event.set()
+            except Exception:
+                pass
             topic = self._account_topic
             if topic:
                 client.subscribe(topic, qos=0)
@@ -279,6 +294,11 @@ class GoveeIoTClient:
             # Async connect and background loop for lower-latency callbacks
             client.connect_async(endpoint, 8883, keepalive=120)
             client.loop_start()
+            # Wait briefly for connection (non-fatal timeout)
+            try:
+                await asyncio.wait_for(conn_event.wait(), timeout=5.0)
+            except Exception:
+                _LOGGER.debug("Govee IoT connect wait timed out; continuing")
         except Exception as ex:
             _LOGGER.warning("Govee IoT connect failed: %s", ex)
 
@@ -286,6 +306,11 @@ class GoveeIoTClient:
         try:
             await loop.run_in_executor(None, self._refresh_device_topics, token, email)
             _LOGGER.info("Loaded %s IoT device topics", len(self._device_topics))
+            try:
+                # Detailed debug of topics mapping
+                _LOGGER.debug("IoT device topics map: %s", self._device_topics)
+            except Exception:
+                pass
         except Exception as ex:
             _LOGGER.debug("Refresh device topics failed: %s", ex)
 
@@ -468,14 +493,40 @@ class GoveeIoTClient:
         # account topic are handled on-demand in publish.
         return bool(self._iot and self._iot.mqtt)
 
+    def get_topics(self) -> dict[str, str]:
+        """Return a copy of the device->topic mapping for diagnostics."""
+        try:
+            return dict(self._device_topics)
+        except Exception:
+            return {}
+
     async def async_publish_control(self, device_id: str, command: str, value: Any) -> bool:
         if not self.can_control:
+            _LOGGER.debug("IoT publish blocked: MQTT not ready")
             return False
         topic = self._device_topics.get(device_id)
         if not topic:
-            # Try to refresh topics on-demand if we have credentials
+            # Try to refresh topics on-demand
             try:
                 loop = asyncio.get_running_loop()
+                if not (self._token and self._email):
+                    # Attempt to login quickly to obtain a token
+                    try:
+                        from .const import CONF_IOT_EMAIL, CONF_IOT_PASSWORD  # type: ignore
+                        email = self._email or self._entry.options.get(CONF_IOT_EMAIL) or self._entry.data.get(CONF_IOT_EMAIL)
+                        password = self._entry.options.get(CONF_IOT_PASSWORD) or self._entry.data.get(CONF_IOT_PASSWORD)
+                        if email and password:
+                            acct = await loop.run_in_executor(None, _login, email, password)
+                            token = acct.get("token") or acct.get("accessToken")
+                            if token:
+                                tval = acct.get("topic")
+                                if isinstance(tval, dict) and 'value' in tval:
+                                    tval = tval['value']
+                                self._account_topic = tval if isinstance(tval, str) else self._account_topic
+                                self._token = token
+                                self._email = email
+                    except Exception as ex:
+                        _LOGGER.debug("IoT quick login failed: %s", ex)
                 if self._token and self._email:
                     await loop.run_in_executor(None, self._refresh_device_topics, self._token, self._email)
                     topic = self._device_topics.get(device_id)
@@ -496,6 +547,7 @@ class GoveeIoTClient:
             except Exception as ex:
                 _LOGGER.debug("IoT on-demand topic refresh failed: %s", ex)
             if not topic:
+                _LOGGER.debug("IoT publish blocked: No topic for %s", device_id)
                 return False
         # Build app-like envelope
         msg: dict[str, Any] = {
@@ -528,6 +580,10 @@ class GoveeIoTClient:
         payload = {"msg": msg}
         try:
             js = __import__('json').dumps(payload, separators=(',', ':'))
+            try:
+                _LOGGER.debug("IoT publish topic=%s payload=%s", topic, js)
+            except Exception:
+                pass
             # QoS 0 like the app
             self._iot.mqtt.publish(topic, js, qos=0, retain=False)
             return True
