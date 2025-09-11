@@ -7,7 +7,6 @@ import base64
 import json
 import logging
 import ssl
-import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -130,9 +129,43 @@ class GoveeIoTClient:
 
             token: str | None = None
             account_id: str | None = None
+            # Small blocking helpers moved to executor
+            def _read_json_file(path: str):
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        return _json.load(f)
+                except Exception:
+                    return None
+            def _write_json_file(path: str, data: dict):
+                try:
+                    with open(path, 'w', encoding='utf-8') as f:
+                        _json.dump(data, f)
+                    return True
+                except Exception:
+                    return False
+            def _read_text_file(path: str) -> str | None:
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        return f.read()
+                except Exception:
+                    return None
+            def _write_text_file(path: str, text: str) -> bool:
+                try:
+                    with open(path, 'w', encoding='utf-8') as f:
+                        f.write(text)
+                    return True
+                except Exception:
+                    return False
+            def _write_bytes_file(path: str, data: bytes) -> bool:
+                try:
+                    with open(path, 'wb') as f:
+                        f.write(data)
+                    return True
+                except Exception:
+                    return False
             # Try cached token from disk first
             try:
-                tok = _json.load(open(token_path, 'r', encoding='utf-8'))
+                tok = await loop.run_in_executor(None, _read_json_file, token_path)
                 if (now_wall - float(tok.get('ts', 0))) < ttl:
                     token = tok.get('token')
                     self._account_topic = tok.get('accountTopic')
@@ -159,22 +192,25 @@ class GoveeIoTClient:
                     tval = tval['value']
                 self._account_topic = tval if isinstance(tval, str) else None
                 account_id = acct.get('accountId') or acct.get('account_id')
-                try:
-                    _json.dump({
+                await loop.run_in_executor(
+                    None,
+                    _write_json_file,
+                    token_path,
+                    {
                         'token': token,
                         'accountTopic': self._account_topic,
                         'accountId': account_id,
                         'clientId': _client_id(email),
                         'ts': now_wall,
-                    }, open(token_path, 'w', encoding='utf-8'))
-                except Exception:
-                    pass
+                    },
+                )
 
             # Load endpoint and cert/key from cache if fresh; otherwise fetch
             endpoint: str | None = None
             try:
                 if (now_wall - os.stat(cert_path).st_mtime) < ttl and os.path.exists(key_path) and os.path.exists(endpoint_path):
-                    endpoint = open(endpoint_path, 'r', encoding='utf-8').read().strip()
+                    txt = await loop.run_in_executor(None, _read_text_file, endpoint_path)
+                    endpoint = (txt or '').strip() if txt is not None else None
             except Exception:
                 endpoint = None
 
@@ -183,12 +219,9 @@ class GoveeIoTClient:
                 endpoint = iot.get("endpoint")
                 p12_pass = iot.get("p12Pass") or iot.get("p12_pass")
                 key_pem, cert_pem = await loop.run_in_executor(None, _extract_pfx, iot["p12"], p12_pass)
-                try:
-                    open(cert_path, 'wb').write(cert_pem)
-                    open(key_path, 'wb').write(key_pem)
-                    open(endpoint_path, 'w', encoding='utf-8').write(endpoint or '')
-                except Exception:
-                    pass
+                await loop.run_in_executor(None, _write_bytes_file, cert_path, cert_pem)
+                await loop.run_in_executor(None, _write_bytes_file, key_path, key_pem)
+                await loop.run_in_executor(None, _write_text_file, endpoint_path, endpoint or '')
         except Exception as ex:
             _LOGGER.warning("Govee IoT login failed: %s", ex)
             return

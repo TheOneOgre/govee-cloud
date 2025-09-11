@@ -255,13 +255,16 @@ class GoveeClient:
         """Discover devices via mobile (app) API using IoT credentials."""
         if not self._config_entry:
             return [], "Missing config entry"
-        email = self._config_entry.options.get(CONF_IOT_EMAIL)
-        password = self._config_entry.options.get(CONF_IOT_PASSWORD)
+        # Prefer options, fall back to initial data for first-run flows
+        email = self._config_entry.options.get(CONF_IOT_EMAIL) or self._config_entry.data.get(CONF_IOT_EMAIL)
+        password = self._config_entry.options.get(CONF_IOT_PASSWORD) or self._config_entry.data.get(CONF_IOT_PASSWORD)
         if not email or not password:
             return [], "IoT credentials not configured"
 
         def _login_and_list():
-            import requests, uuid, time as _t
+            import requests
+            import uuid
+            import time as _t
             def _client_id(em: str) -> str:
                 return uuid.uuid5(uuid.NAMESPACE_DNS, em).hex
             # Login to app backend

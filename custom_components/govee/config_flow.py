@@ -1,9 +1,9 @@
 """Config flow for Govee integration."""
 
 import logging
-import voluptuous as vol # pyright: ignore[reportMissingImports]
+import voluptuous as vol  # pyright: ignore[reportMissingImports]
 
-from homeassistant import config_entries, core, exceptions  # type: ignore
+from homeassistant import config_entries, exceptions  # type: ignore
 import homeassistant.helpers.config_validation as cv  # type: ignore
 from homeassistant.const import CONF_DELAY  # type: ignore
 from homeassistant.core import callback  # type: ignore
@@ -18,8 +18,7 @@ from .const import (
     DOMAIN,
 )
 
-from .api import GoveeClient
-from .learning_storage import GoveeLearningStorage # pyright: ignore[reportMissingImports]
+# No direct imports of API/storage needed in flow
 
 
 
@@ -83,9 +82,15 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
     VERSION = 1
 
     def __init__(self, config_entry):
-        self.config_entry = config_entry
+        # Do not assign to self.config_entry (deprecated in HA 2025.12)
+        self._entry = config_entry
         self.options = dict(config_entry.options)
         self._pending_options: dict | None = None
+
+    @property
+    def entry(self):
+        # Prefer framework-provided property if available
+        return getattr(self, "config_entry", self._entry)
 
     async def async_step_init(self, user_input=None):
         return await self.async_step_user(user_input)
@@ -107,8 +112,8 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
 
             if not errors:
                 # Collect credentials if missing
-                email = user_input.get(CONF_IOT_EMAIL) or self.config_entry.options.get(CONF_IOT_EMAIL, "")
-                password = user_input.get(CONF_IOT_PASSWORD) or self.config_entry.options.get(CONF_IOT_PASSWORD, "")
+                email = user_input.get(CONF_IOT_EMAIL) or self.entry.options.get(CONF_IOT_EMAIL, "")
+                password = user_input.get(CONF_IOT_PASSWORD) or self.entry.options.get(CONF_IOT_PASSWORD, "")
                 if not email or not password:
                     self._pending_options = dict(self.options)
                     self._pending_options.update(user_input)
@@ -126,11 +131,11 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
                 ): cv.positive_int,
                 vol.Required(
                     CONF_USE_ASSUMED_STATE,
-                    default=self.config_entry.options.get(CONF_USE_ASSUMED_STATE, True),
+                    default=self.entry.options.get(CONF_USE_ASSUMED_STATE, True),
                 ): cv.boolean,
                 vol.Required(
                     CONF_OFFLINE_IS_OFF,
-                    default=self.config_entry.options.get(CONF_OFFLINE_IS_OFF, False),
+                    default=self.entry.options.get(CONF_OFFLINE_IS_OFF, False),
                 ): cv.boolean,
             }
         )
@@ -160,8 +165,8 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_create_entry(title="Govee", data=self.options)
         iot_schema = vol.Schema(
             {
-                vol.Required(CONF_IOT_EMAIL, default=self.config_entry.options.get(CONF_IOT_EMAIL, "")): cv.string,
-                vol.Required(CONF_IOT_PASSWORD, default=self.config_entry.options.get(CONF_IOT_PASSWORD, "")): cv.string,
+                vol.Required(CONF_IOT_EMAIL, default=self.entry.options.get(CONF_IOT_EMAIL, "")): cv.string,
+                vol.Required(CONF_IOT_PASSWORD, default=self.entry.options.get(CONF_IOT_PASSWORD, "")): cv.string,
             }
         )
         return self.async_show_form(step_id="iot", data_schema=iot_schema, errors=errors)
