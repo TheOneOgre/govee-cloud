@@ -5,7 +5,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries, core, exceptions
 import homeassistant.helpers.config_validation as cv
-from homeassistant.const import CONF_DELAY, CONF_SCAN_INTERVAL
+from homeassistant.const import CONF_DELAY
 from homeassistant.core import callback
 
 from .const import (
@@ -24,8 +24,7 @@ from .learning_storage import GoveeLearningStorage
 
 
 _LOGGER = logging.getLogger(__name__)
-CONF_POLLING_MODE = "polling_mode"   # "auto" or "manual"
-DEFAULT_SCAN_INTERVAL = 60
+# Deprecated: polling mode constants (IoT-only)
 
 ## Developer API validation removed; IoT-only
 
