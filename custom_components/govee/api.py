@@ -415,13 +415,23 @@ class GoveeClient:
                 if {"colortemperaturek", "colortem", "color_temperature_k"} & keys:
                     derived_ct = True
 
-            self._devices[dev_id] = GoveeDevice(
-                device=dev_id,
-                model=model,
-                device_name=item.get("deviceName") or item.get("device_name") or dev_id,
-                controllable=bool(item.get("controllable", True)),
-                retrievable=bool(item.get("retrievable", True)),
-                support_cmds=support_cmds,
+            # If we still have no capability information at all (mobile list often lacks it),
+            # assume basic light capabilities to allow control attempts. API will reject if invalid.
+            if not support_cmds and not any([derived_turn, derived_brightness, derived_color, derived_ct]):
+                derived_turn = True
+                derived_brightness = True
+                derived_color = True
+
+                # Treat None as unknown/true for controllable/retrievable when mobile API omits flags
+                controllable_flag = item.get("controllable")
+                retrievable_flag = item.get("retrievable")
+                self._devices[dev_id] = GoveeDevice(
+                    device=dev_id,
+                    model=model,
+                    device_name=item.get("deviceName") or item.get("device_name") or dev_id,
+                    controllable=True if controllable_flag is None else bool(controllable_flag),
+                    retrievable=True if retrievable_flag is None else bool(retrievable_flag),
+                    support_cmds=support_cmds,
                 support_turn=("turn" in support_cmds) or derived_turn,
                 support_brightness=("brightness" in support_cmds) or derived_brightness,
                 support_color=("color" in support_cmds) or derived_color,
@@ -488,16 +498,26 @@ class GoveeClient:
             return False, f"Unknown device {device}"
         if not device.controllable:
             return False, f"Device {device.device} not controllable"
-        if command not in device.support_cmds:
-            # Fall back to derived support flags when supportCmds is missing/empty
-            if command == "turn" and not device.support_turn:
-                return False, f"Command {command} not supported"
-            if command == "brightness" and not device.support_brightness:
-                return False, f"Command {command} not supported"
-            if command == "color" and not device.support_color:
-                return False, f"Command {command} not supported"
-            if command == "colorTem" and not device.support_color_temp:
-                return False, f"Command {command} not supported"
+        # Gate by known capabilities only. If capabilities are unknown (common with mobile list),
+        # optimistically allow commands and let the API return an error if unsupported.
+        if command not in (device.support_cmds or []):
+            support_known = bool(device.support_cmds) or any(
+                [
+                    device.support_turn,
+                    device.support_brightness,
+                    device.support_color,
+                    device.support_color_temp,
+                ]
+            )
+            if support_known:
+                if command == "turn" and not device.support_turn:
+                    return False, f"Command {command} not supported"
+                if command == "brightness" and not device.support_brightness:
+                    return False, f"Command {command} not supported"
+                if command == "color" and not device.support_color:
+                    return False, f"Command {command} not supported"
+                if command == "colorTem" and not device.support_color_temp:
+                    return False, f"Command {command} not supported"
 
         payload = {
             "device": device.device,
