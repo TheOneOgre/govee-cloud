@@ -39,12 +39,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Optionally start IoT push client (read-only) if enabled and credentials present
+    # Optionally start IoT push client (read-only/control) if enabled and credentials present
     try:
-        if entry.options.get(CONF_IOT_PUSH_ENABLED, False) and entry.options.get(CONF_IOT_EMAIL) and entry.options.get(CONF_IOT_PASSWORD):
+        opts = entry.options
+        data = entry.data
+        enabled = opts.get(CONF_IOT_PUSH_ENABLED, True)
+        email = opts.get(CONF_IOT_EMAIL) or data.get(CONF_IOT_EMAIL)
+        password = opts.get(CONF_IOT_PASSWORD) or data.get(CONF_IOT_PASSWORD)
+        if enabled and email and password:
             iot = GoveeIoTClient(hass, entry, hub)
             await iot.start()
             hass.data[DOMAIN][entry.entry_id]["iot_client"] = iot
+        else:
+            _LOGGER.debug("Govee IoT not started: enabled=%s email=%s password=%s", enabled, bool(email), bool(password))
     except Exception as ex:
         _LOGGER.warning("Govee IoT push not started: %s", ex)
     return True

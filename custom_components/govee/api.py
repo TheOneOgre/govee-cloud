@@ -540,15 +540,10 @@ class GoveeClient:
             if now < device.lock_set_until and device.lock_set_until - now < 2.0:
                 await asyncio.sleep(device.lock_set_until - now)
 
-            # Preferred: IoT (AWS MQTT) control if enabled and available
+            # Preferred: IoT (AWS MQTT) control if available
             try:
-                from .const import DOMAIN, CONF_IOT_CONTROL_ENABLED, CONF_IOT_PUSH_ENABLED  # type: ignore
-                if (
-                    self._hass
-                    and self._config_entry
-                    and self._config_entry.options.get(CONF_IOT_PUSH_ENABLED, False)
-                    and self._config_entry.options.get(CONF_IOT_CONTROL_ENABLED, True)
-                ):
+                from .const import DOMAIN  # type: ignore
+                if self._hass and self._config_entry:
                     entry_id = self._config_entry.entry_id
                     entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id)
                     iot = entry_data and entry_data.get("iot_client")
@@ -579,6 +574,10 @@ class GoveeClient:
                             return True, None
             except Exception as ex:
                 _LOGGER.debug("IoT control path error: %s", ex)
+
+            # If no API key configured, avoid REST fallback to prevent 401s
+            if not self._api_key:
+                return False, "IoT control unavailable and no API key configured"
 
             await self._rate_limit_delay()
         async with self._session.put(_API_CONTROL, headers=self._headers(), json=payload) as resp:
