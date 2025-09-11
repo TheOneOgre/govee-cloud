@@ -106,6 +106,8 @@ class GoveeIoTClient:
         self._last_reconcile: dict[str, float] = {}
         self._device_topics: dict[str, str] = {}
         self._account_topic: str | None = None
+        self._token: str | None = None
+        self._email: str | None = None
 
     async def start(self):
         opts = self._entry.options
@@ -204,6 +206,9 @@ class GoveeIoTClient:
                         'ts': now_wall,
                     },
                 )
+            # Save for on-demand refreshes
+            self._token = token
+            self._email = email
 
             # Load endpoint and cert/key from cache if fresh; otherwise fetch
             endpoint: str | None = None
@@ -459,14 +464,39 @@ class GoveeIoTClient:
 
     @property
     def can_control(self) -> bool:
-        return bool(self._iot and self._iot.mqtt and self._device_topics and self._account_topic)
+        # Consider control possible as soon as MQTT and account topic are ready;
+        # device topic may be refreshed on-demand.
+        return bool(self._iot and self._iot.mqtt and self._account_topic)
 
     async def async_publish_control(self, device_id: str, command: str, value: Any) -> bool:
         if not self.can_control:
             return False
         topic = self._device_topics.get(device_id)
         if not topic:
-            return False
+            # Try to refresh topics on-demand if we have credentials
+            try:
+                loop = asyncio.get_running_loop()
+                if self._token and self._email:
+                    await loop.run_in_executor(None, self._refresh_device_topics, self._token, self._email)
+                    topic = self._device_topics.get(device_id)
+                if not topic:
+                    # Try reading from cached devices.json
+                    def _read_cached_map(path: str) -> dict[str, str] | None:
+                        try:
+                            txt = open(path, 'r', encoding='utf-8').read()
+                            return __import__('json').loads(txt)
+                        except Exception:
+                            return None
+                    cache_dir = self._hass.config.path('.storage/govee_iot')
+                    path = __import__('os').path.join(cache_dir, 'devices.json')
+                    mapping = await loop.run_in_executor(None, _read_cached_map, path)
+                    if isinstance(mapping, dict):
+                        self._device_topics.update({k: v for k, v in mapping.items() if isinstance(v, str)})
+                        topic = self._device_topics.get(device_id)
+            except Exception as ex:
+                _LOGGER.debug("IoT on-demand topic refresh failed: %s", ex)
+            if not topic:
+                return False
         # Build app-like envelope
         msg: dict[str, Any] = {
             "accountTopic": self._account_topic,
