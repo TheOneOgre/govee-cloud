@@ -589,6 +589,10 @@ class GoveeClient:
 
             await self._rate_limit_delay()
         async with self._session.put(_API_CONTROL, headers=self._headers(), json=payload) as resp:
+            try:
+                _LOGGER.debug("REST control PUT %s payload=%s", _API_CONTROL, payload)
+            except Exception:
+                pass
             self._track_rate_limit(resp)
 
             if resp.status == 429:
