@@ -33,13 +33,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Legacy style: global "hub" key
     hass.data[DOMAIN]["hub"] = hub
 
-    devices, err = await hub.get_devices()
-    if err:
-        _LOGGER.warning("Could not load Govee devices at startup: %s", err)
-
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-    # Optionally start IoT push client (read-only/control) if enabled and credentials present
+    # Start IoT client early so control is ready ASAP
     try:
         opts = entry.options
         data = entry.data
@@ -54,6 +48,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             _LOGGER.debug("Govee IoT not started: enabled=%s email=%s password=%s", enabled, bool(email), bool(password))
     except Exception as ex:
         _LOGGER.warning("Govee IoT push not started: %s", ex)
+
+    devices, err = await hub.get_devices()
+    if err:
+        _LOGGER.warning("Could not load Govee devices at startup: %s", err)
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 

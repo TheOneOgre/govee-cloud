@@ -464,9 +464,9 @@ class GoveeIoTClient:
 
     @property
     def can_control(self) -> bool:
-        # Consider control possible as soon as MQTT and account topic are ready;
-        # device topic may be refreshed on-demand.
-        return bool(self._iot and self._iot.mqtt and self._account_topic)
+        # Consider control possible as soon as MQTT client exists; device topic and
+        # account topic are handled on-demand in publish.
+        return bool(self._iot and self._iot.mqtt)
 
     async def async_publish_control(self, device_id: str, command: str, value: Any) -> bool:
         if not self.can_control:
@@ -499,13 +499,14 @@ class GoveeIoTClient:
                 return False
         # Build app-like envelope
         msg: dict[str, Any] = {
-            "accountTopic": self._account_topic,
             "cmd": None,
             "data": None,
             "cmdVersion": 1,
             "transaction": f"v_{_ms_ts()}000",
             "type": 1,
         }
+        if self._account_topic:
+            msg["accountTopic"] = self._account_topic
         if command == "turn":
             msg["cmd"] = "turn"
             msg["data"] = {"val": 1 if str(value).lower() == "on" else 0}

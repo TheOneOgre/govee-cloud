@@ -547,7 +547,7 @@ class GoveeClient:
                     entry_id = self._config_entry.entry_id
                     entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id)
                     iot = entry_data and entry_data.get("iot_client")
-                    if iot and getattr(iot, "can_control", False):
+                    if iot:
                         ok = await iot.async_publish_control(device.device, command, value)
                         if ok:
                             # Record pending expectation for UI smoothing
