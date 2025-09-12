@@ -401,9 +401,13 @@ class GoveeClient:
         if not token and self._hass:
             def _read_token(path: str):
                 try:
-                    import json as _json
+                    import json as _json, time as _t
                     data = _json.load(open(path, "r", encoding="utf-8"))
-                    return data.get("token")
+                    ts = float(data.get("ts", 0))
+                    # Use only if cached within 15 days
+                    if (_t.time() - ts) < (15 * 24 * 60 * 60):
+                        return data.get("token")
+                    return None
                 except Exception:
                     return None
 
@@ -414,12 +418,44 @@ class GoveeClient:
             except Exception:
                 token = None
 
-        # As a last resort, do one login (rare) and rely on IoT client to cache it
+        # As a last resort, do one login (rare) and persist it for 15 days
         if not token:
             try:
                 from .iot_client import _login  # type: ignore
                 acct = await asyncio.get_running_loop().run_in_executor(None, _login, email, password)
                 token = acct.get("token") or acct.get("accessToken")
+                # Persist token to the same IoT cache location for reuse across restarts
+                if token and self._hass:
+                    try:
+                        import os
+                        import json as _json
+                        import uuid as _uuid
+                        now_wall = int(time.time())
+                        cache_dir = self._hass.config.path(".storage/govee_iot")
+                        os.makedirs(cache_dir, exist_ok=True)
+                        token_path = os.path.join(cache_dir, "token.json")
+                        client_id = _uuid.uuid5(_uuid.NAMESPACE_DNS, email).hex
+                        # Normalize topic/account fields if present
+                        tval = acct.get("topic")
+                        if isinstance(tval, dict) and "value" in tval:
+                            tval = tval["value"]
+                        account_topic = tval if isinstance(tval, str) else None
+                        account_id = acct.get("accountId") or acct.get("account_id")
+                        payload = {
+                            "token": token,
+                            "accountTopic": account_topic,
+                            "accountId": account_id,
+                            "clientId": client_id,
+                            "ts": now_wall,
+                        }
+                        # Best-effort write; ignore errors
+                        try:
+                            with open(token_path, "w", encoding="utf-8") as f:
+                                _json.dump(payload, f)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
             except Exception:
                 token = None
         if not token:
