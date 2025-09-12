@@ -139,12 +139,20 @@ class GoveeClient:
             entry_bucket = dom.setdefault(entry_id, {})
             iot = entry_bucket.get("iot_client")
             if iot:
+                try:
+                    _LOGGER.debug("IoT client already present; can_control=%s", getattr(iot, 'can_control', False))
+                except Exception:
+                    pass
                 return
             opts = self._config_entry.options
             data = self._config_entry.data
             enabled = opts.get(CONF_IOT_PUSH_ENABLED, True)
             email = opts.get(CONF_IOT_EMAIL) or data.get(CONF_IOT_EMAIL)
             password = opts.get(CONF_IOT_PASSWORD) or data.get(CONF_IOT_PASSWORD)
+            _LOGGER.debug(
+                "Ensure IoT: enabled=%s has_email=%s has_password=%s",
+                enabled, bool(email), bool(password)
+            )
             if enabled and email and password:
                 iot = GoveeIoTClient(self._hass, self._config_entry, self)
                 try:
@@ -394,6 +402,8 @@ class GoveeClient:
             entry_id = self._config_entry.entry_id
             iot = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("iot_client") if self._hass else None
             token = getattr(iot, "_token", None)
+            if token:
+                _LOGGER.debug("login cache found, using cache")
         except Exception:
             token = None
 
@@ -415,11 +425,14 @@ class GoveeClient:
                 cache_dir = self._hass.config.path(".storage/govee_iot")
                 token_path = __import__("os").path.join(cache_dir, "token.json")
                 token = await asyncio.get_running_loop().run_in_executor(None, _read_token, token_path)
+                if token:
+                    _LOGGER.debug("login cache found, using cache")
             except Exception:
                 token = None
 
         # As a last resort, do one login (rare) and persist it for 15 days
         if not token:
+            _LOGGER.debug("no login cache founds, logging in")
             try:
                 from .iot_client import _login  # type: ignore
                 acct = await asyncio.get_running_loop().run_in_executor(None, _login, email, password)
@@ -432,8 +445,6 @@ class GoveeClient:
                         import uuid as _uuid
                         now_wall = int(time.time())
                         cache_dir = self._hass.config.path(".storage/govee_iot")
-                        os.makedirs(cache_dir, exist_ok=True)
-                        token_path = os.path.join(cache_dir, "token.json")
                         client_id = _uuid.uuid5(_uuid.NAMESPACE_DNS, email).hex
                         # Normalize topic/account fields if present
                         tval = acct.get("topic")
@@ -448,12 +459,17 @@ class GoveeClient:
                             "clientId": client_id,
                             "ts": now_wall,
                         }
-                        # Best-effort write; ignore errors
-                        try:
-                            with open(token_path, "w", encoding="utf-8") as f:
-                                _json.dump(payload, f)
-                        except Exception:
-                            pass
+                        loop = asyncio.get_running_loop()
+                        def _persist_token(dir_path: str, data: dict) -> bool:
+                            try:
+                                os.makedirs(dir_path, exist_ok=True)
+                                token_path = os.path.join(dir_path, "token.json")
+                                with open(token_path, "w", encoding="utf-8") as f:
+                                    _json.dump(data, f)
+                                return True
+                            except Exception:
+                                return False
+                        await loop.run_in_executor(None, _persist_token, cache_dir, payload)
                     except Exception:
                         pass
             except Exception:

@@ -122,10 +122,20 @@ class GoveeIoTClient:
 
     async def start(self):
         opts = self._entry.options
-        enabled = opts.get(CONF_IOT_PUSH_ENABLED, False)
+        enabled = opts.get(CONF_IOT_PUSH_ENABLED, True)
         email = opts.get(CONF_IOT_EMAIL)
         password = opts.get(CONF_IOT_PASSWORD)
-        if not enabled or not email or not password:
+        _LOGGER.debug(
+            "IoT start: enabled=%s has_email=%s has_password=%s",
+            enabled,
+            bool(email),
+            bool(password),
+        )
+        if not enabled:
+            _LOGGER.debug("IoT disabled via options; skipping start")
+            return
+        if not email or not password:
+            _LOGGER.debug("IoT missing credentials; skipping start")
             return
         loop = asyncio.get_running_loop()
         # Login and fetch IoT key in executor, with 15-day on-disk cache
@@ -183,11 +193,13 @@ class GoveeIoTClient:
                     token = tok.get('token')
                     self._account_topic = tok.get('accountTopic')
                     account_id = tok.get('accountId')
+                    _LOGGER.debug("login cache found, using cache")
             except Exception:
                 token = None
 
             # If no valid disk token, try in-memory cache, else login
             if not token:
+                _LOGGER.debug("no login cache founds, logging in")
                 now_mono = time.monotonic()
                 cached = _APP_LOGIN_CACHE.get(email)
                 acct: dict[str, Any] | None = None
@@ -200,6 +212,7 @@ class GoveeIoTClient:
                 if not token:
                     _LOGGER.warning("Govee IoT: no token from login response")
                     return
+                _LOGGER.debug("IoT login successful; token acquired")
                 tval = acct.get("topic")
                 if isinstance(tval, dict) and 'value' in tval:
                     tval = tval['value']
@@ -227,10 +240,13 @@ class GoveeIoTClient:
                 if (now_wall - os.stat(cert_path).st_mtime) < ttl and os.path.exists(key_path) and os.path.exists(endpoint_path):
                     txt = await loop.run_in_executor(None, _read_text_file, endpoint_path)
                     endpoint = (txt or '').strip() if txt is not None else None
+                    if endpoint:
+                        _LOGGER.debug("IoT endpoint/certs loaded from cache: %s", endpoint)
             except Exception:
                 endpoint = None
 
             if not endpoint:
+                _LOGGER.debug("Fetching IoT key and endpoint from API")
                 iot = await loop.run_in_executor(None, _get_iot_key, token, email)
                 endpoint = iot.get("endpoint")
                 p12_pass = iot.get("p12Pass") or iot.get("p12_pass")
@@ -238,6 +254,7 @@ class GoveeIoTClient:
                 await loop.run_in_executor(None, _write_bytes_file, cert_path, cert_pem)
                 await loop.run_in_executor(None, _write_bytes_file, key_path, key_pem)
                 await loop.run_in_executor(None, _write_text_file, endpoint_path, endpoint or '')
+                _LOGGER.debug("IoT endpoint/certs saved to cache: %s", endpoint)
         except Exception as ex:
             _LOGGER.warning("Govee IoT login failed: %s", ex)
             return
@@ -247,6 +264,7 @@ class GoveeIoTClient:
             ctx = ssl.create_default_context()
             ctx.load_verify_locations(cafile=certifi.where())
             ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
+            _LOGGER.debug("IoT SSL context ready")
         except Exception as ex:
             _LOGGER.warning("Govee IoT SSL context failed: %s", ex)
             return
@@ -302,11 +320,13 @@ class GoveeIoTClient:
 
         try:
             # Async connect and background loop for lower-latency callbacks
+            _LOGGER.debug("Connecting MQTT to %s:8883", endpoint)
             client.connect_async(endpoint, 8883, keepalive=120)
             client.loop_start()
             # Wait briefly for connection (non-fatal timeout)
             try:
                 await asyncio.wait_for(conn_event.wait(), timeout=5.0)
+                _LOGGER.debug("Govee IoT connected (wait event signaled)")
             except Exception:
                 _LOGGER.debug("Govee IoT connect wait timed out; continuing")
         except Exception as ex:
@@ -567,7 +587,13 @@ class GoveeIoTClient:
 
     async def async_publish_control(self, device_id: str, command: str, value: Any) -> bool:
         if not self.can_control:
-            _LOGGER.debug("IoT publish blocked: MQTT not ready")
+            # Be explicit about what's missing
+            if not self._iot:
+                _LOGGER.debug("IoT publish blocked: IoT state not initialized")
+            elif not self._iot.mqtt:
+                _LOGGER.debug("IoT publish blocked: MQTT client missing")
+            else:
+                _LOGGER.debug("IoT publish blocked: MQTT not ready")
             return False
         topic = self._device_topics.get(device_id)
         if not topic:
