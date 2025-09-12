@@ -514,6 +514,7 @@ class GoveeClient:
 
         timestamp = int(time.time())
         learning_infos = await self._storage.read()
+        platform_enriched_done = False
 
         _LOGGER.debug("Discovered %s devices from Govee Mobile API", len(items))
         for item in items:
@@ -697,10 +698,55 @@ class GoveeClient:
                     learned_color_temp_max=None,
                 )
 
-            # Log capabilities to help debug missing devices/models
-            _LOGGER.debug(
-                "Device %s (%s) controllable=%s retrievable=%s support=%s ct[min=%s max=%s step=%s] quirk[lan=%s avoid_platform=%s]",
-                dev_id,
+        # If any devices still have MAC/ID as name, try the newer Platform API device list to enrich names
+        if not platform_enriched_done:
+            try:
+                missing_names = [d.device for d in self._devices.values() if not d.device_name or d.device_name == d.device]
+                if missing_names:
+                    from .platform_app import PlatformAppClient  # type: ignore
+                    pac = PlatformAppClient(email, password)
+                    try:
+                        pdata = await pac.list_devices()
+                    except Exception as ex_pa:
+                        pdata = None
+                        _LOGGER.debug("Platform API list failed: %s", ex_pa)
+                    mapping: Dict[str, Dict[str, Any]] = {}
+                    # Robustly walk payload to find list of devices
+                    def _collect_devices(obj):
+                        if isinstance(obj, list):
+                            for e in obj:
+                                _collect_devices(e)
+                        elif isinstance(obj, dict):
+                            # A plausible device entry has a 'device' id and some name field
+                            if ("device" in obj or "deviceId" in obj) and any(k in obj for k in ("deviceName", "device_name", "name")):
+                                did = obj.get("device") or obj.get("deviceId")
+                                if isinstance(did, str):
+                                    mapping[did] = obj
+                            for v in obj.values():
+                                _collect_devices(v)
+                    if isinstance(pdata, dict):
+                        _collect_devices(pdata)
+                    if mapping:
+                        updated = 0
+                        for did, dev in mapping.items():
+                            if did in self._devices and (self._devices[did].device_name == self._devices[did].device or not self._devices[did].device_name):
+                                nm = dev.get("deviceName") or dev.get("device_name") or dev.get("name")
+                                if isinstance(nm, str) and nm:
+                                    self._devices[did].device_name = nm
+                                    updated += 1
+                                mv = dev.get("model") or dev.get("sku") or dev.get("type")
+                                if isinstance(mv, str) and mv:
+                                    self._devices[did].model = mv
+                        if updated:
+                            _LOGGER.debug("Platform API enrichment updated %s device names", updated)
+                platform_enriched_done = True
+            except Exception as ex_e:
+                _LOGGER.debug("Platform API enrichment error: %s", ex_e)
+
+        # Log capabilities to help debug missing devices/models
+        _LOGGER.debug(
+            "Device %s (%s) controllable=%s retrievable=%s support=%s ct[min=%s max=%s step=%s] quirk[lan=%s avoid_platform=%s]",
+            dev_id,
                 model,
                 item.get("controllable"),
                 item.get("retrievable"),
