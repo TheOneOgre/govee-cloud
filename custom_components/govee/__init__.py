@@ -1,6 +1,7 @@
 """The Govee integration."""
 import logging
 
+import homeassistant.helpers.config_validation as cv  # type: ignore
 from homeassistant.config_entries import ConfigEntry  # type: ignore
 from homeassistant.core import HomeAssistant  # type: ignore
 
@@ -12,6 +13,9 @@ from .learning_storage import GoveeLearningStorage
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[str] = ["light"]
+
+# This integration is config-entry only (no YAML options)
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: dict):
