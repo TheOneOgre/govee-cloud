@@ -66,10 +66,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
             device_count = max(1, len(tmp_devices))
             safe_delay = max(30, int(86400 * device_count / 10000))  # 10k/day quota
             update_interval = timedelta(seconds=safe_delay)
-           # _LOGGER.warning(
-           #     "Polling mode AUTO: %s devices → interval set to %ss (safe under 10k/day quota).",
-           #     device_count,
-           #     safe_delay,
+            _LOGGER.debug(
+                "Polling mode AUTO: %s devices → interval set to %ss (safe under 10k/day quota).",
+                device_count,
+                safe_delay,
             )
     else:  # manual mode
         update_interval = timedelta(seconds=delay)
