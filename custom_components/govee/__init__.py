@@ -42,8 +42,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         password = opts.get(CONF_IOT_PASSWORD) or data.get(CONF_IOT_PASSWORD)
         if enabled and email and password:
             iot = GoveeIoTClient(hass, entry, hub)
+            _LOGGER.debug(
+                "Starting Govee IoT: enabled=%s email=%s password=%s",
+                enabled,
+                bool(email),
+                bool(password),
+            )
             await iot.start()
             hass.data[DOMAIN][entry.entry_id]["iot_client"] = iot
+            try:
+                _LOGGER.debug(
+                    "Govee IoT started: can_control=%s account_topic=%s token_present=%s",
+                    iot.can_control,
+                    getattr(iot, "_account_topic", None) is not None,
+                    bool(getattr(iot, "_token", None)),
+                )
+            except Exception:
+                pass
         else:
             _LOGGER.debug("Govee IoT not started: enabled=%s email=%s password=%s", enabled, bool(email), bool(password))
     except Exception as ex:

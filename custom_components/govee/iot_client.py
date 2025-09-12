@@ -344,6 +344,18 @@ class GoveeIoTClient:
         except Exception as ex:
             _LOGGER.debug("Refresh device topics failed: %s", ex)
 
+        # Final readiness summary
+        try:
+            _LOGGER.debug(
+                "IoT start summary: iot_state=%s mqtt_present=%s account_topic=%s topics=%d",
+                bool(self._iot),
+                bool(self._iot and self._iot.mqtt),
+                bool(self._account_topic),
+                len(self._device_topics),
+            )
+        except Exception:
+            pass
+
     def _schedule_state_update(self, device_id: str, state: Dict[str, Any]):
         async def _apply():
             dev = self._hub._devices.get(device_id)
