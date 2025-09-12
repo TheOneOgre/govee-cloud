@@ -61,6 +61,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 pass
         else:
             _LOGGER.debug("Govee IoT not started: enabled=%s email=%s password=%s", enabled, bool(email), bool(password))
+            # Proactively notify users migrating from API-key versions to IoT credentials
+            try:
+                # Repairs issue (shows in Settings → Repairs) with deep link to Integrations
+                from homeassistant.helpers import issue_registry as ir  # type: ignore
+                issue_registry = ir.async_get(hass)
+                issue_registry.async_create_issue(
+                    DOMAIN,
+                    "missing_iot_credentials",
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.ERROR,
+                    translation_key="missing_iot_credentials",
+                    translation_placeholders={},
+                    learn_more_url="/config/integrations/integration/govee",
+                )
+            except Exception:
+                pass
+            try:
+                # Persistent notification as a user-facing prompt
+                msg = (
+                    "Govee has switched to IoT-based control. Open Integrations → "
+                    "Govee → Configure and enter your Govee account email and password.\n\n"
+                    "Quick link: /config/integrations/integration/govee"
+                )
+                await hass.services.async_call(
+                    "persistent_notification",
+                    "create",
+                    {
+                        "title": "Govee: IoT credentials required",
+                        "message": msg,
+                        "notification_id": f"{DOMAIN}_missing_iot_credentials",
+                    },
+                )
+            except Exception:
+                pass
     except Exception as ex:
         _LOGGER.warning("Govee IoT push not started: %s", ex)
 
