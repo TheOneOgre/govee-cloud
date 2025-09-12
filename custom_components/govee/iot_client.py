@@ -122,9 +122,11 @@ class GoveeIoTClient:
 
     async def start(self):
         opts = self._entry.options
+        data = self._entry.data
         enabled = opts.get(CONF_IOT_PUSH_ENABLED, True)
-        email = opts.get(CONF_IOT_EMAIL)
-        password = opts.get(CONF_IOT_PASSWORD)
+        # Fall back to config entry data if options are empty (common on first run)
+        email = opts.get(CONF_IOT_EMAIL) or data.get(CONF_IOT_EMAIL)
+        password = opts.get(CONF_IOT_PASSWORD) or data.get(CONF_IOT_PASSWORD)
         _LOGGER.debug(
             "IoT start: enabled=%s has_email=%s has_password=%s",
             enabled,
