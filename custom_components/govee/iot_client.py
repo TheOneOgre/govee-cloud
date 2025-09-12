@@ -120,6 +120,29 @@ class GoveeIoTClient:
         # Passive MQTT discovery cache (device_id -> last state payload)
         self._seen_devices: dict[str, dict] = {}
 
+        # Global publish token bucket (max publishes per minute across all devices)
+        # Default: 20/min
+        self._pub_bucket_capacity: float = 20.0
+        self._pub_bucket_refill_per_sec: float = self._pub_bucket_capacity / 60.0
+        self._pub_bucket_tokens: float = self._pub_bucket_capacity
+        self._pub_bucket_last: float = time.monotonic()
+
+    def _pub_bucket_take(self, tokens: float = 1.0) -> float:
+        """Global IoT publish token bucket: return wait seconds if not enough tokens."""
+        now = time.monotonic()
+        elapsed = max(0.0, now - self._pub_bucket_last)
+        self._pub_bucket_tokens = min(
+            self._pub_bucket_capacity,
+            self._pub_bucket_tokens + elapsed * self._pub_bucket_refill_per_sec,
+        )
+        self._pub_bucket_last = now
+        if self._pub_bucket_tokens >= tokens:
+            self._pub_bucket_tokens -= tokens
+            return 0.0
+        needed = tokens - self._pub_bucket_tokens
+        wait = needed / self._pub_bucket_refill_per_sec if self._pub_bucket_refill_per_sec > 0 else 0.0
+        return max(0.0, wait)
+
     async def start(self):
         opts = self._entry.options
         data = self._entry.data
@@ -585,6 +608,14 @@ class GoveeIoTClient:
             topic = self._account_topic
             if not topic:
                 return False
+            # Enforce global publish rate limit (20/min default)
+            wait = self._pub_bucket_take(1.0)
+            if wait > 0:
+                _LOGGER.debug("IoT publish throttled (status broadcast): waiting %.2fs", wait)
+                try:
+                    await asyncio.sleep(wait)
+                except asyncio.CancelledError:
+                    return False
             msg = {
                 "cmd": "status",
                 "cmdVersion": 2,
@@ -635,6 +666,15 @@ class GoveeIoTClient:
             if not topic:
                 _LOGGER.debug("IoT publish blocked: No topic for %s", device_id)
                 return False
+        # Enforce global publish rate limit (20/min default)
+        wait = self._pub_bucket_take(1.0)
+        if wait > 0:
+            _LOGGER.debug("IoT publish throttled (control %s): waiting %.2fs", command, wait)
+            try:
+                await asyncio.sleep(wait)
+            except asyncio.CancelledError:
+                return False
+
         # Build app-like envelope
         msg: dict[str, Any] = {
             "cmd": None,
@@ -684,6 +724,14 @@ class GoveeIoTClient:
         topic = self._device_topics.get(device_id)
         if not topic:
             return False
+        # Enforce global publish rate limit (20/min default)
+        wait = self._pub_bucket_take(1.0)
+        if wait > 0:
+            _LOGGER.debug("IoT publish throttled (device status %s): waiting %.2fs", device_id, wait)
+            try:
+                await asyncio.sleep(wait)
+            except asyncio.CancelledError:
+                return False
         msg = {
             "cmd": "status",
             "cmdVersion": 2,

@@ -743,26 +743,11 @@ class GoveeClient:
             except Exception as ex_e:
                 _LOGGER.debug("Platform API enrichment error: %s", ex_e)
 
-        # Log capabilities to help debug missing devices/models
-        _LOGGER.debug(
-            "Device %s (%s) controllable=%s retrievable=%s support=%s ct[min=%s max=%s step=%s] quirk[lan=%s avoid_platform=%s]",
-            dev_id,
-                model,
-                item.get("controllable"),
-                item.get("retrievable"),
-                ",".join(support_cmds),
-                ct_min,
-                ct_max,
-                ct_step,
-                bool(quirk and quirk.lan_api_capable),
-                bool(quirk and quirk.avoid_platform_api),
-            )
-
-            try:
-                self._last_devices_fetch_ts = time.time()
-            except Exception:
-                pass
-            return list(self._devices.values()), None
+        try:
+            self._last_devices_fetch_ts = time.time()
+        except Exception:
+            pass
+        return list(self._devices.values()), None
 
     async def init_devices(self) -> Tuple[List[GoveeDevice], str | None]:
         """Discover devices and request IoT status for initial state."""

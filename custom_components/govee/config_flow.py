@@ -23,9 +23,6 @@ from .const import (
 
 
 _LOGGER = logging.getLogger(__name__)
-# Deprecated: polling mode constants (IoT-only)
-
-## Developer API validation removed; IoT-only
 
 
 # Removed disabled-attribute option.
