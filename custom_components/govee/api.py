@@ -127,6 +127,35 @@ class GoveeClient:
         connector = aiohttp.TCPConnector(ssl=self._ssl_context)
         self._session = ClientSession(connector=connector)
 
+    async def _ensure_iot_started(self):
+        """Ensure IoT client exists and is started; best-effort."""
+        try:
+            if not (self._hass and self._config_entry):
+                return
+            from .const import DOMAIN, CONF_IOT_EMAIL, CONF_IOT_PASSWORD, CONF_IOT_PUSH_ENABLED  # type: ignore
+            from .iot_client import GoveeIoTClient  # type: ignore
+            entry_id = self._config_entry.entry_id
+            dom = self._hass.data.setdefault(DOMAIN, {})
+            entry_bucket = dom.setdefault(entry_id, {})
+            iot = entry_bucket.get("iot_client")
+            if iot:
+                return
+            opts = self._config_entry.options
+            data = self._config_entry.data
+            enabled = opts.get(CONF_IOT_PUSH_ENABLED, True)
+            email = opts.get(CONF_IOT_EMAIL) or data.get(CONF_IOT_EMAIL)
+            password = opts.get(CONF_IOT_PASSWORD) or data.get(CONF_IOT_PASSWORD)
+            if enabled and email and password:
+                iot = GoveeIoTClient(self._hass, self._config_entry, self)
+                try:
+                    await iot.start()
+                    entry_bucket["iot_client"] = iot
+                    _LOGGER.debug("IoT client started on-demand")
+                except Exception as ex:
+                    _LOGGER.debug("On-demand IoT start failed: %s", ex)
+        except Exception:
+            return
+
 
     async def close(self):
         """Gracefully close aiohttp session."""
@@ -252,7 +281,17 @@ class GoveeClient:
         return ok, err
 
     async def get_devices(self) -> Tuple[List[GoveeDevice], str | None]:
-        """Discover devices via mobile (app) API using IoT credentials."""
+        """Discover devices via mobile (app) API using cached IoT token (avoid re-login)."""
+        # Short-circuit: if we already populated devices in the last 60s, reuse
+        try:
+            cache_window = 300  # seconds
+            now = time.time()
+            last = getattr(self, "_last_devices_fetch_ts", 0)
+            if self._devices and (now - last) < cache_window:
+                return list(self._devices.values()), None
+        except Exception:
+            pass
+
         if not self._config_entry:
             return [], "Missing config entry"
         # Prefer options, fall back to initial data for first-run flows
@@ -261,26 +300,81 @@ class GoveeClient:
         if not email or not password:
             return [], "IoT credentials not configured"
 
-        def _login_and_list():
+        # Ensure IoT client is started so we can reuse its token
+        await self._ensure_iot_started()
+
+        # MQTT-only discovery path: try to discover via IoT account topic without HTTP
+        try:
+            from .const import DOMAIN  # type: ignore
+            entry_id = self._config_entry.entry_id if self._config_entry else None
+            iot = self._hass.data.get(DOMAIN, {}).get(entry_id or "", {}).get("iot_client") if (self._hass and entry_id) else None
+            if iot:
+                try:
+                    if hasattr(iot, "async_broadcast_status_request"):
+                        await iot.async_broadcast_status_request()
+                except Exception:
+                    pass
+                try:
+                    await asyncio.sleep(1.0)
+                except Exception:
+                    pass
+                topics = iot.get_topics() if hasattr(iot, "get_topics") else {}
+                seen = iot.get_known_devices() if hasattr(iot, "get_known_devices") else {}
+                device_ids = list(seen.keys()) or list(topics.keys())
+                if device_ids:
+                    try:
+                        learning_infos = await self._storage.read()
+                    except Exception:
+                        learning_infos = {}
+                    timestamp = int(time.time())
+                    _LOGGER.debug("MQTT discovery found %s devices", len(device_ids))
+                    for dev_id in device_ids:
+                        if dev_id in self._devices:
+                            continue
+                        learned = learning_infos.get(dev_id, GoveeLearnedInfo())
+                        self._devices[dev_id] = GoveeDevice(
+                            device=dev_id,
+                            model="unknown",
+                            device_name=dev_id,
+                            controllable=True,
+                            retrievable=True,
+                            support_cmds=[],
+                            support_turn=True,
+                            support_brightness=True,
+                            support_color=True,
+                            support_color_temp=False,
+                            color_temp_min=None,
+                            color_temp_max=None,
+                            color_temp_step=1,
+                            lan_api_capable=False,
+                            avoid_platform_api=False,
+                            online=True,
+                            timestamp=timestamp,
+                            source=GoveeSource.API,
+                            learned_set_brightness_max=learned.set_brightness_max,
+                            learned_get_brightness_max=learned.get_brightness_max,
+                            before_set_brightness_turn_on=learned.before_set_brightness_turn_on,
+                            config_offline_is_off=learned.config_offline_is_off,
+                            learned_color_temp_min=None,
+                            learned_color_temp_max=None,
+                        )
+                    try:
+                        self._last_devices_fetch_ts = time.time()
+                    except Exception:
+                        pass
+                    return list(self._devices.values()), None
+        except Exception:
+            pass
+
+        async def _list_with_token(token: str):
             import requests
             import uuid
             import time as _t
+
             def _client_id(em: str) -> str:
                 return uuid.uuid5(uuid.NAMESPACE_DNS, em).hex
-            # Login to app backend
-            r = requests.post(
-                "https://app2.govee.com/account/rest/account/v1/login",
-                json={"email": email, "password": password, "client": _client_id(email)},
-                timeout=30,
-            )
-            r.raise_for_status()
-            jd = r.json()
-            client = jd.get("client") or jd.get("data") or jd
-            token = client.get("token") or client.get("accessToken")
-            if not token:
-                raise RuntimeError("No token from login")
-            # Device list
-            h = {
+
+            headers = {
                 "Authorization": f"Bearer {token}",
                 "appVersion": APP_VERSION,
                 "clientId": _client_id(email),
@@ -289,14 +383,72 @@ class GoveeClient:
                 "timestamp": str(int(_t.time() * 1000)),
                 "User-Agent": _ua(),
             }
-            dl = requests.post("https://app2.govee.com/device/rest/devices/v1/list", headers=h, timeout=30)
-            dl.raise_for_status()
-            return dl.json()
+            resp = requests.post("https://app2.govee.com/device/rest/devices/v1/list", headers=headers, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
 
+        # Try token from IoT client first
+        token = None
         try:
-            data = await asyncio.get_running_loop().run_in_executor(None, _login_and_list)
-        except Exception as ex:
-            return [], f"Mobile list failed: {ex}"
+            from .const import DOMAIN  # type: ignore
+            entry_id = self._config_entry.entry_id
+            iot = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("iot_client") if self._hass else None
+            token = getattr(iot, "_token", None)
+        except Exception:
+            token = None
+
+        # If no token in memory, try on-disk token cache
+        if not token and self._hass:
+            def _read_token(path: str):
+                try:
+                    import json as _json
+                    data = _json.load(open(path, "r", encoding="utf-8"))
+                    return data.get("token")
+                except Exception:
+                    return None
+
+            try:
+                cache_dir = self._hass.config.path(".storage/govee_iot")
+                token_path = __import__("os").path.join(cache_dir, "token.json")
+                token = await asyncio.get_running_loop().run_in_executor(None, _read_token, token_path)
+            except Exception:
+                token = None
+
+        # As a last resort, do one login (rare) and rely on IoT client to cache it
+        if not token:
+            try:
+                from .iot_client import _login  # type: ignore
+                acct = await asyncio.get_running_loop().run_in_executor(None, _login, email, password)
+                token = acct.get("token") or acct.get("accessToken")
+            except Exception:
+                token = None
+        if not token:
+            return [], "Mobile list failed: no token available"
+
+        # Make the device list call in executor
+        def _list_call_sync(tok: str):
+            import requests
+            import uuid
+            import time as _t
+            def _client_id(em: str) -> str:
+                return uuid.uuid5(uuid.NAMESPACE_DNS, em).hex
+            headers = {
+                "Authorization": f"Bearer {tok}",
+                "appVersion": APP_VERSION,
+                "clientId": _client_id(email),
+                "clientType": "1",
+                "iotVersion": "0",
+                "timestamp": str(int(_t.time() * 1000)),
+                "User-Agent": _ua(),
+            }
+            resp = requests.post("https://app2.govee.com/device/rest/devices/v1/list", headers=headers, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+        try:
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(None, _list_call_sync, token)
+        except Exception as ex2:
+            return [], f"Mobile list failed: {ex2}"
 
         # Extract items from either {devices:[...]} or {data:{devices:[...]}}
         items = []
@@ -468,7 +620,11 @@ class GoveeClient:
                 bool(quirk and quirk.avoid_platform_api),
             )
 
-        return list(self._devices.values()), None
+            try:
+                self._last_devices_fetch_ts = time.time()
+            except Exception:
+                pass
+            return list(self._devices.values()), None
 
     async def init_devices(self) -> Tuple[List[GoveeDevice], str | None]:
         """Discover devices and request IoT status for initial state."""
@@ -552,6 +708,8 @@ class GoveeClient:
             try:
                 from .const import DOMAIN  # type: ignore
                 if self._hass and self._config_entry:
+                    # Ensure IoT client is running (best-effort)
+                    await self._ensure_iot_started()
                     entry_id = self._config_entry.entry_id
                     entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id)
                     iot = entry_data and entry_data.get("iot_client")

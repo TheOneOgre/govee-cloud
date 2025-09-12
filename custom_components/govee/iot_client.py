@@ -117,6 +117,8 @@ class GoveeIoTClient:
             )
         except Exception:
             self._email = None
+        # Passive MQTT discovery cache (device_id -> last state payload)
+        self._seen_devices: dict[str, dict] = {}
 
     async def start(self):
         opts = self._entry.options
@@ -273,6 +275,14 @@ class GoveeIoTClient:
                     device_id = data.get("device")
                     state = data.get("state") or {}
                     self._schedule_state_update(device_id, state)
+                    # Track discovery
+                    try:
+                        if isinstance(device_id, str):
+                            self._seen_devices.setdefault(device_id, {})
+                            if isinstance(state, dict):
+                                self._seen_devices[device_id].update(state)
+                    except Exception:
+                        pass
             except Exception as ex:
                 _LOGGER.debug("IoT message parse failed: %s", ex)
 
@@ -430,6 +440,25 @@ class GoveeIoTClient:
                         pass
 
     def _refresh_device_topics(self, token: str, email: str):
+        # Prefer cached devices.json if fresh (15-day TTL)
+        try:
+            now_wall = time.time()
+            ttl = 15 * 24 * 60 * 60  # 15 days
+            cache_dir = self._hass.config.path('.storage/govee_iot')
+            os.makedirs(cache_dir, exist_ok=True)
+            path = os.path.join(cache_dir, 'devices.json')
+            if os.path.exists(path) and (now_wall - os.stat(path).st_mtime) < ttl:
+                try:
+                    mapping = __import__('json').load(open(path, 'r', encoding='utf-8'))
+                    if isinstance(mapping, dict) and mapping:
+                        self._device_topics = {k: v for k, v in mapping.items() if isinstance(v, str)}
+                        _LOGGER.debug("Using cached IoT device topics (%s entries)", len(self._device_topics))
+                        return
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         resp = requests.post(
             "https://app2.govee.com/device/rest/devices/v1/list",
             headers={
@@ -478,7 +507,7 @@ class GoveeIoTClient:
             if dev_id and topic:
                 mapping[dev_id] = topic
         self._device_topics = mapping
-        # Persist to disk for reuse
+        # Persist to disk for reuse (15 days)
         try:
             cache_dir = self._hass.config.path('.storage/govee_iot')
             os.makedirs(cache_dir, exist_ok=True)
@@ -500,52 +529,65 @@ class GoveeIoTClient:
         except Exception:
             return {}
 
+    def get_known_devices(self) -> dict[str, dict]:
+        """Return mapping of discovered device_id -> last seen state (if any)."""
+        try:
+            return dict(self._seen_devices)
+        except Exception:
+            return {}
+
+    async def async_broadcast_status_request(self) -> bool:
+        """Request statuses by publishing a status message to the account topic.
+
+        Not all firmwares listen on account topic for status requests; best-effort.
+        """
+        try:
+            if not self._iot or not self._iot.mqtt:
+                return False
+            topic = self._account_topic
+            if not topic:
+                return False
+            msg = {
+                "cmd": "status",
+                "cmdVersion": 2,
+                "transaction": f"v_{_ms_ts()}000",
+                "type": 0,
+            }
+            payload = {"msg": msg}
+            js = __import__('json').dumps(payload, separators=(',', ':'))
+            try:
+                _LOGGER.debug("IoT broadcast status on account topic=%s payload=%s", topic, js)
+            except Exception:
+                pass
+            self._iot.mqtt.publish(topic, js, qos=0, retain=False)
+            return True
+        except Exception as ex:
+            _LOGGER.debug("IoT broadcast status failed: %s", ex)
+            return False
+
     async def async_publish_control(self, device_id: str, command: str, value: Any) -> bool:
         if not self.can_control:
             _LOGGER.debug("IoT publish blocked: MQTT not ready")
             return False
         topic = self._device_topics.get(device_id)
         if not topic:
-            # Try to refresh topics on-demand
+            # Try reading from cached devices.json only; do not hit mobile API
             try:
                 loop = asyncio.get_running_loop()
-                if not (self._token and self._email):
-                    # Attempt to login quickly to obtain a token
+                def _read_cached_map(path: str) -> dict[str, str] | None:
                     try:
-                        from .const import CONF_IOT_EMAIL, CONF_IOT_PASSWORD  # type: ignore
-                        email = self._email or self._entry.options.get(CONF_IOT_EMAIL) or self._entry.data.get(CONF_IOT_EMAIL)
-                        password = self._entry.options.get(CONF_IOT_PASSWORD) or self._entry.data.get(CONF_IOT_PASSWORD)
-                        if email and password:
-                            acct = await loop.run_in_executor(None, _login, email, password)
-                            token = acct.get("token") or acct.get("accessToken")
-                            if token:
-                                tval = acct.get("topic")
-                                if isinstance(tval, dict) and 'value' in tval:
-                                    tval = tval['value']
-                                self._account_topic = tval if isinstance(tval, str) else self._account_topic
-                                self._token = token
-                                self._email = email
-                    except Exception as ex:
-                        _LOGGER.debug("IoT quick login failed: %s", ex)
-                if self._token and self._email:
-                    await loop.run_in_executor(None, self._refresh_device_topics, self._token, self._email)
+                        txt = open(path, 'r', encoding='utf-8').read()
+                        return __import__('json').loads(txt)
+                    except Exception:
+                        return None
+                cache_dir = self._hass.config.path('.storage/govee_iot')
+                path = __import__('os').path.join(cache_dir, 'devices.json')
+                mapping = await loop.run_in_executor(None, _read_cached_map, path)
+                if isinstance(mapping, dict):
+                    self._device_topics.update({k: v for k, v in mapping.items() if isinstance(v, str)})
                     topic = self._device_topics.get(device_id)
-                if not topic:
-                    # Try reading from cached devices.json
-                    def _read_cached_map(path: str) -> dict[str, str] | None:
-                        try:
-                            txt = open(path, 'r', encoding='utf-8').read()
-                            return __import__('json').loads(txt)
-                        except Exception:
-                            return None
-                    cache_dir = self._hass.config.path('.storage/govee_iot')
-                    path = __import__('os').path.join(cache_dir, 'devices.json')
-                    mapping = await loop.run_in_executor(None, _read_cached_map, path)
-                    if isinstance(mapping, dict):
-                        self._device_topics.update({k: v for k, v in mapping.items() if isinstance(v, str)})
-                        topic = self._device_topics.get(device_id)
             except Exception as ex:
-                _LOGGER.debug("IoT on-demand topic refresh failed: %s", ex)
+                _LOGGER.debug("IoT cached topic load failed: %s", ex)
             if not topic:
                 _LOGGER.debug("IoT publish blocked: No topic for %s", device_id)
                 return False
