@@ -370,7 +370,7 @@ class GoveeClient:
                         self._last_devices_fetch_ts = time.time()
                     except Exception:
                         pass
-                    return list(self._devices.values()), None
+                    # Do not return early; continue to mobile API to enrich names/capabilities
         except Exception:
             pass
 
@@ -519,7 +519,20 @@ class GoveeClient:
         for item in items:
             dev_id = item["device"]
             if dev_id in self._devices:
-                continue
+                # Update existing placeholder (e.g., created via MQTT discovery) with richer info
+                try:
+                    existing = self._devices[dev_id]
+                    name = item.get("deviceName") or item.get("device_name")
+                    if isinstance(name, str) and name and name != existing.device_name:
+                        existing.device_name = name
+                    model_val = item.get("model") or item.get("sku") or item.get("type")
+                    if isinstance(model_val, str) and model_val:
+                        existing.model = model_val
+                    # We will also refresh capability flags below when constructing the device
+                except Exception:
+                    pass
+                # Do not skip; allow capability parsing and flag updates using the same logic
+                # but we will avoid replacing the object entirely; instead apply updates.
             learned = learning_infos.get(dev_id, GoveeLearnedInfo())
             # Try to parse color temperature capability range from device list
             ct_min = None
@@ -626,36 +639,63 @@ class GoveeClient:
                 derived_brightness = True
                 derived_color = True
 
-                # Treat None as unknown/true for controllable/retrievable when mobile API omits flags
-                controllable_flag = item.get("controllable")
-                retrievable_flag = item.get("retrievable")
+            # Treat None as unknown/true for controllable/retrievable when mobile API omits flags
+            controllable_flag = item.get("controllable")
+            retrievable_flag = item.get("retrievable")
+            name_val = item.get("deviceName") or item.get("device_name") or dev_id
+            if dev_id in self._devices:
+                # Update existing device object in place
+                dev_obj = self._devices[dev_id]
+                dev_obj.device_name = name_val or dev_obj.device_name
+                dev_obj.model = model
+                dev_obj.controllable = True if controllable_flag is None else bool(controllable_flag)
+                dev_obj.retrievable = True if retrievable_flag is None else bool(retrievable_flag)
+                dev_obj.support_cmds = support_cmds
+                dev_obj.support_turn = ("turn" in support_cmds) or derived_turn
+                dev_obj.support_brightness = ("brightness" in support_cmds) or derived_brightness
+                dev_obj.support_color = ("color" in support_cmds) or derived_color
+                dev_obj.support_color_temp = ("colorTem" in support_cmds) or derived_ct or (ct_min is not None or ct_max is not None)
+                dev_obj.color_temp_min = ct_min
+                dev_obj.color_temp_max = ct_max
+                dev_obj.color_temp_step = ct_step or 1
+                dev_obj.lan_api_capable = bool(quirk and quirk.lan_api_capable)
+                dev_obj.avoid_platform_api = bool(quirk and quirk.avoid_platform_api)
+                dev_obj.online = True
+                dev_obj.timestamp = timestamp
+                dev_obj.source = GoveeSource.API
+                dev_obj.learned_set_brightness_max = learned.set_brightness_max
+                dev_obj.learned_get_brightness_max = learned.get_brightness_max
+                dev_obj.before_set_brightness_turn_on = learned.before_set_brightness_turn_on
+                dev_obj.config_offline_is_off = learned.config_offline_is_off
+                # Keep learned CT overrides untouched here; they are managed elsewhere
+            else:
                 self._devices[dev_id] = GoveeDevice(
                     device=dev_id,
                     model=model,
-                    device_name=item.get("deviceName") or item.get("device_name") or dev_id,
+                    device_name=name_val,
                     controllable=True if controllable_flag is None else bool(controllable_flag),
                     retrievable=True if retrievable_flag is None else bool(retrievable_flag),
                     support_cmds=support_cmds,
-                support_turn=("turn" in support_cmds) or derived_turn,
-                support_brightness=("brightness" in support_cmds) or derived_brightness,
-                support_color=("color" in support_cmds) or derived_color,
-                # Consider color temp supported if API lists command OR we detected a CT range
-                support_color_temp=("colorTem" in support_cmds) or derived_ct or (ct_min is not None or ct_max is not None),
-                color_temp_min=ct_min,
-                color_temp_max=ct_max,
-                color_temp_step=ct_step or 1,
-                lan_api_capable=bool(quirk and quirk.lan_api_capable),
-                avoid_platform_api=bool(quirk and quirk.avoid_platform_api),
-                online=True,
-                timestamp=timestamp,
-                source=GoveeSource.API,
-                learned_set_brightness_max=learned.set_brightness_max,
-                learned_get_brightness_max=learned.get_brightness_max,
-                before_set_brightness_turn_on=learned.before_set_brightness_turn_on,
-                config_offline_is_off=learned.config_offline_is_off,
-                learned_color_temp_min=None,
-                learned_color_temp_max=None,
-            )
+                    support_turn=("turn" in support_cmds) or derived_turn,
+                    support_brightness=("brightness" in support_cmds) or derived_brightness,
+                    support_color=("color" in support_cmds) or derived_color,
+                    # Consider color temp supported if API lists command OR we detected a CT range
+                    support_color_temp=("colorTem" in support_cmds) or derived_ct or (ct_min is not None or ct_max is not None),
+                    color_temp_min=ct_min,
+                    color_temp_max=ct_max,
+                    color_temp_step=ct_step or 1,
+                    lan_api_capable=bool(quirk and quirk.lan_api_capable),
+                    avoid_platform_api=bool(quirk and quirk.avoid_platform_api),
+                    online=True,
+                    timestamp=timestamp,
+                    source=GoveeSource.API,
+                    learned_set_brightness_max=learned.set_brightness_max,
+                    learned_get_brightness_max=learned.get_brightness_max,
+                    before_set_brightness_turn_on=learned.before_set_brightness_turn_on,
+                    config_offline_is_off=learned.config_offline_is_off,
+                    learned_color_temp_min=None,
+                    learned_color_temp_max=None,
+                )
 
             # Log capabilities to help debug missing devices/models
             _LOGGER.debug(

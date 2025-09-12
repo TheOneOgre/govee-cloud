@@ -261,11 +261,15 @@ class GoveeIoTClient:
             _LOGGER.warning("Govee IoT login failed: %s", ex)
             return
 
-        # Prepare SSL context from cached files
+        # Prepare SSL context from cached files (in executor to avoid blocking loop)
         try:
-            ctx = ssl.create_default_context()
-            ctx.load_verify_locations(cafile=certifi.where())
-            ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
+            loop = asyncio.get_running_loop()
+            def _build_ssl_context(ca_path: str, cert_path_in: str, key_path_in: str):
+                ctx_local = ssl.create_default_context()
+                ctx_local.load_verify_locations(cafile=ca_path)
+                ctx_local.load_cert_chain(certfile=cert_path_in, keyfile=key_path_in)
+                return ctx_local
+            ctx = await loop.run_in_executor(None, _build_ssl_context, certifi.where(), cert_path, key_path)
             _LOGGER.debug("IoT SSL context ready")
         except Exception as ex:
             _LOGGER.warning("Govee IoT SSL context failed: %s", ex)
