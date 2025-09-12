@@ -1,0 +1,63 @@
+Personal Use and No-Warranty License (PUNWL) v1.0
+Copyright (c) 2025 TheOneOgre
+
+1. Definitions
+   “Software” means the source code, binaries, documentation, and any other files in this repository.
+   “Owner” means the copyright holder identified above.
+   “Personal Use” means use by an individual for that individual’s private, non-commercial purposes,
+   including modification and private sharing with friends/household or within a small team where no
+   money changes hands and no commercial advantage is sought.
+
+2. Grant of Rights (Personal, Non-Commercial)
+   Subject to the terms below, the Owner grants you a worldwide, royalty-free, non-exclusive license to:
+     (a) use and run the Software for Personal Use;
+     (b) copy and modify the Software for Personal Use; and
+     (c) redistribute verbatim or modified copies of the Software **only for Personal Use**,
+         provided you (i) include this license and copyright notice; and (ii) clearly mark changes.
+
+3. Prohibited Uses
+   You may NOT:
+     (a) use, sell, license, host, or offer the Software, or any service derived from it, for
+         commercial purposes (including SaaS, paid support, ads, or monetized distribution);
+     (b) remove or alter copyright, license, or attribution notices;
+     (c) use the Software to violate any law, third-party terms of service, or to circumvent access
+         controls on services you do not own or have permission to use;
+     (d) engage in abusive behavior such as high-volume spamming, denial-of-service, excessive polling,
+         or actions reasonably likely to degrade or disrupt third-party services or networks.
+
+4. Acceptable Use & Safety
+   You agree to (a) rate-limit automated actions, (b) validate inputs and avoid sending out-of-range or
+   harmful commands, (c) safeguard any credentials or keys used with the Software, and (d) operate the
+   Software only on systems you control or are authorized to control.
+
+5. No Warranty
+   THE SOFTWARE IS PROVIDED “AS IS” AND “AS AVAILABLE,” WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+   PURPOSE, TITLE, AND NON-INFRINGEMENT. YOU USE THE SOFTWARE AT YOUR OWN RISK.
+
+6. Limitation of Liability
+   TO THE MAXIMUM EXTENT PERMITTED BY LAW, IN NO EVENT SHALL THE OWNER OR CONTRIBUTORS BE LIABLE FOR
+   ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+   ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE,
+   INCLUDING WITHOUT LIMITATION ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES.
+
+7. Indemnity
+   You agree to indemnify and hold harmless the Owner and contributors from and against any claims,
+   liabilities, losses, and expenses (including reasonable attorneys’ fees) arising from your use of the
+   Software, your violation of this license, or your violation of any law or third-party rights.
+
+8. Termination
+   This license terminates automatically if you breach any term. Upon termination, you must stop using
+   the Software and destroy copies in your possession, except for archival copies required by law.
+   Sections 5–9 survive termination.
+
+9. Governing Law; Severability
+   This license will be governed by the laws applicable in your jurisdiction unless otherwise required
+   by law. If any provision is unenforceable, the remainder shall remain in full force and effect.
+
+10. Attribution
+   If you provide a user interface or documentation that references the Software, include a readable
+   attribution such as “Powered by [Project Name]” with a link to the repository (if applicable).
+
+11. Contact & Exceptions
+   For commercial licensing, exceptions, or clarifications, contact the Owner.
