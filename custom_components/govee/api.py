@@ -842,7 +842,7 @@ class GoveeClient:
                             # Record pending expectation for UI smoothing
                             now2 = time.monotonic()
                             device.lock_set_until = now2 + 0.8
-                            device.pending_until = now2 + 2.0
+                            device.pending_until = now2 + 5.0
                             try:
                                 if command == "brightness":
                                     device.pending_brightness = max(0, min(255, int(round(int(value) / 100 * 255))))
@@ -893,7 +893,7 @@ class GoveeClient:
                 device.lock_set_until = time.monotonic() + 0.8
                 # Record pending expectation to smooth UI against stale reads/pushes
                 now = time.monotonic()
-                device.pending_until = now + 2.0
+                device.pending_until = now + 5.0
                 try:
                     if command == "brightness":
                         # value is 0–100; store HA 0–255 for comparison

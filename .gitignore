@@ -8,3 +8,4 @@ govee_login.py
 iot_bypass copy.py
 iot_bypass.py
 decomp/
+tests/

@@ -692,11 +692,15 @@ class GoveeIoTClient:
             msg["cmd"] = "brightness"
             msg["data"] = {"val": int(value)}
         elif command == "color":
-            msg["cmd"] = "color"
+            # Use colorwc for broader device compatibility; include CT=0
+            msg["cmd"] = "colorwc"
             msg["data"] = {
-                "r": int(value.get("r", 0)),
-                "g": int(value.get("g", 0)),
-                "b": int(value.get("b", 0)),
+                "color": {
+                    "r": int(value.get("r", 0)),
+                    "g": int(value.get("g", 0)),
+                    "b": int(value.get("b", 0)),
+                },
+                "colorTemInKelvin": 0,
             }
         elif command == "colorTem":
             msg["cmd"] = "colorwc"

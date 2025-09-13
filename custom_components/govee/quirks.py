@@ -23,10 +23,21 @@ class Quirk:
 
 # Minimal subset of known light models and flags derived from govee2mqtt.
 _QUIRKS: Dict[str, Quirk] = {
-    # Specific lights with IoT oddities
-    "H6121": Quirk("H6121", color_temp_range=(2000, 9000), iot_api_supported=False),
-    "H6154": Quirk("H6154", color_temp_range=(2000, 9000), iot_api_supported=False),
-    "H6176": Quirk("H6176", color_temp_range=(2000, 9000), iot_api_supported=False),
+    # Specific lights seen to behave differently in metadata; ignore IoT false flags
+    "H6121": Quirk("H6121", color_temp_range=(2000, 9000)),
+    "H6154": Quirk("H6154", color_temp_range=(2000, 9000)),
+    "H6176": Quirk("H6176", color_temp_range=(2000, 9000)),
+    # Devices with unreliable Platform metadata
+    "H6141": Quirk("H6141", color_temp_range=(2000, 9000), avoid_platform_api=True),
+    "H6159": Quirk("H6159", color_temp_range=(2000, 9000), avoid_platform_api=True),
+    "H6003": Quirk("H6003", color_temp_range=(2000, 9000), avoid_platform_api=True),
+    # BLE-only in govee2mqtt context; treat Platform metadata cautiously
+    "H6102": Quirk("H6102", color_temp_range=(2000, 9000), avoid_platform_api=True),
+    "H6053": Quirk("H6053", color_temp_range=(2000, 9000), avoid_platform_api=True),
+    "H617C": Quirk("H617C", color_temp_range=(2000, 9000), avoid_platform_api=True),
+    "H617E": Quirk("H617E", color_temp_range=(2000, 9000), avoid_platform_api=True),
+    "H617F": Quirk("H617F", color_temp_range=(2000, 9000), avoid_platform_api=True),
+    "H6119": Quirk("H6119", color_temp_range=(2000, 9000), avoid_platform_api=True),
     # LAN-capable lights (subset from govee2mqtt list)
     "H6072": Quirk("H6072", color_temp_range=(2000, 9000), lan_api_capable=True),
     "H6073": Quirk("H6073", color_temp_range=(2000, 9000), lan_api_capable=True),

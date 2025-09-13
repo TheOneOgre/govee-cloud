@@ -283,7 +283,7 @@ class GoveeLightEntity(LightEntity):
                 # Optimistically mark pending to avoid UI flicker on stale reads
                 try:
                     import time as _t
-                    dev.pending_until = _t.monotonic() + 2.0
+                    dev.pending_until = _t.monotonic() + 5.0
                     dev.pending_color = (int(col[0]), int(col[1]), int(col[2]))
                     dev.pending_ct = 0
                 except Exception:
@@ -324,7 +324,7 @@ class GoveeLightEntity(LightEntity):
                 # Optimistically mark pending CT
                 try:
                     import time as _t
-                    dev.pending_until = _t.monotonic() + 2.0
+                    dev.pending_until = _t.monotonic() + 5.0
                     dev.pending_ct = int(color_temp)
                     dev.pending_color = (0,0,0)
                 except Exception:
@@ -346,7 +346,7 @@ class GoveeLightEntity(LightEntity):
                 # Optimistically mark pending brightness
                 try:
                     import time as _t
-                    dev.pending_until = _t.monotonic() + 2.0
+                    dev.pending_until = _t.monotonic() + 5.0
                     dev.pending_brightness = int(ha_bright)
                 except Exception:
                     pass
