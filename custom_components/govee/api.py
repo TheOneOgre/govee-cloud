@@ -595,7 +595,9 @@ class GoveeClient:
                     if key in props and isinstance(props[key], dict):
                         _parse_range_dict(props[key].get("range"))
 
-            support_cmds = item.get("supportCmds", [])
+            support_cmds = [
+                cmd.lower() for cmd in item.get("supportCmds", []) if isinstance(cmd, str)
+            ]
             # Apply model-specific quirks if known
             model = item.get("model") or item.get("sku") or item.get("type") or "unknown"
             quirk = resolve_quirk(model) if model else None
@@ -655,8 +657,14 @@ class GoveeClient:
                 dev_obj.support_cmds = support_cmds
                 dev_obj.support_turn = ("turn" in support_cmds) or derived_turn
                 dev_obj.support_brightness = ("brightness" in support_cmds) or derived_brightness
-                dev_obj.support_color = ("color" in support_cmds) or derived_color
-                dev_obj.support_color_temp = ("colorTem" in support_cmds) or derived_ct or (ct_min is not None or ct_max is not None)
+                if support_cmds or derived_color:
+                    dev_obj.support_color = (
+                        "color" in support_cmds or "colorwc" in support_cmds or derived_color
+                    )
+                if support_cmds or derived_ct or (ct_min is not None or ct_max is not None):
+                    dev_obj.support_color_temp = (
+                        "colortem" in support_cmds or derived_ct or (ct_min is not None or ct_max is not None)
+                    )
                 dev_obj.color_temp_min = ct_min
                 dev_obj.color_temp_max = ct_max
                 dev_obj.color_temp_step = ct_step or 1
@@ -680,9 +688,13 @@ class GoveeClient:
                     support_cmds=support_cmds,
                     support_turn=("turn" in support_cmds) or derived_turn,
                     support_brightness=("brightness" in support_cmds) or derived_brightness,
-                    support_color=("color" in support_cmds) or derived_color,
+                    support_color=(
+                        "color" in support_cmds or "colorwc" in support_cmds or derived_color
+                    ),
                     # Consider color temp supported if API lists command OR we detected a CT range
-                    support_color_temp=("colorTem" in support_cmds) or derived_ct or (ct_min is not None or ct_max is not None),
+                    support_color_temp=(
+                        "colortem" in support_cmds or derived_ct or (ct_min is not None or ct_max is not None)
+                    ),
                     color_temp_min=ct_min,
                     color_temp_max=ct_max,
                     color_temp_step=ct_step or 1,
@@ -788,7 +800,8 @@ class GoveeClient:
             return False, f"Device {device.device} not controllable"
         # Gate by known capabilities only. If capabilities are unknown (common with mobile list),
         # optimistically allow commands and let the API return an error if unsupported.
-        if command not in (device.support_cmds or []):
+        command_l = command.lower()
+        if command_l not in (device.support_cmds or []):
             support_known = bool(device.support_cmds) or any(
                 [
                     device.support_turn,
@@ -798,13 +811,13 @@ class GoveeClient:
                 ]
             )
             if support_known:
-                if command == "turn" and not device.support_turn:
+                if command_l == "turn" and not device.support_turn:
                     return False, f"Command {command} not supported"
-                if command == "brightness" and not device.support_brightness:
+                if command_l == "brightness" and not device.support_brightness:
                     return False, f"Command {command} not supported"
-                if command == "color" and not device.support_color:
+                if command_l == "color" and not device.support_color:
                     return False, f"Command {command} not supported"
-                if command == "colorTem" and not device.support_color_temp:
+                if command_l == "colortem" and not device.support_color_temp:
                     return False, f"Command {command} not supported"
 
         payload = {
