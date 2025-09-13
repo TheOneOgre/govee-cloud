@@ -20,6 +20,15 @@ from paho.mqtt.client import Client as MqttClient
 
 from .const import DOMAIN, CONF_IOT_EMAIL, CONF_IOT_PASSWORD, CONF_IOT_PUSH_ENABLED
 
+
+class GoveeLoginError(Exception):
+    """Raised when Govee login fails."""
+
+    def __init__(self, message: str, code: int | None = None):
+        self.code = code
+        text = f"{message} (code={code})" if code is not None else message
+        super().__init__(text)
+
 _LOGGER = logging.getLogger(__name__)
 
 APP_VERSION = "5.6.01"
@@ -44,6 +53,23 @@ def _client_id(email: str) -> str:
     return uuid.uuid5(uuid.NAMESPACE_DNS, email).hex
 
 
+def _extract_token(payload: Dict[str, Any]) -> str | None:
+    """Extract a token value from various possible fields."""
+
+    if not isinstance(payload, dict):
+        return None
+    token_keys = ["token", "accessToken", "authToken", "tokenValue"]
+    for key in token_keys:
+        token = payload.get(key)
+        if isinstance(token, str) and token:
+            _LOGGER.debug("Login token found under key '%s'", key)
+            return token
+    nested = payload.get("data")
+    if isinstance(nested, dict):
+        return _extract_token(nested)
+    return None
+
+
 def _login(email: str, password: str) -> Dict[str, Any]:
     resp = requests.post(
         "https://app2.govee.com/account/rest/account/v1/login",
@@ -52,11 +78,17 @@ def _login(email: str, password: str) -> Dict[str, Any]:
     )
     resp.raise_for_status()
     data = resp.json()
+    token = _extract_token(data)
     client = data.get("client") or data.get("data") or data
     t = client.get("topic")
     if isinstance(t, dict) and "value" in t:
         client["topic"] = t["value"]
-    return client
+    if token:
+        client.setdefault("token", token)
+        return client
+    err_msg = data.get("message") or data.get("msg") or "no token in response"
+    code = data.get("code")
+    raise GoveeLoginError(err_msg, code)
 
 
 def _get_iot_key(token: str, email: str) -> Dict[str, Any]:
@@ -231,9 +263,13 @@ class GoveeIoTClient:
                 if cached and (now_mono - cached[1]) < _CACHE_TTL_SEC:
                     acct = cached[0]
                 else:
-                    acct = await loop.run_in_executor(None, _login, email, password)
-                    _APP_LOGIN_CACHE[email] = (acct, now_mono)
-                token = acct.get("token") or acct.get("accessToken")
+                    try:
+                        acct = await loop.run_in_executor(None, _login, email, password)
+                        _APP_LOGIN_CACHE[email] = (acct, now_mono)
+                    except GoveeLoginError as ex:
+                        _LOGGER.warning("Govee IoT login failed: %s", ex)
+                        return
+                token = _extract_token(acct)
                 if not token:
                     _LOGGER.warning("Govee IoT: no token from login response")
                     return

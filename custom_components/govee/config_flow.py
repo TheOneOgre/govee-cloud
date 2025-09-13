@@ -1,6 +1,7 @@
 """Config flow for Govee integration."""
 
 import logging
+import requests
 import voluptuous as vol  # pyright: ignore[reportMissingImports]
 
 from homeassistant import config_entries, exceptions  # type: ignore
@@ -17,6 +18,7 @@ from .const import (
     CONF_IOT_CONTROL_ENABLED,
     DOMAIN,
 )
+from .iot_client import _login, _extract_token, GoveeLoginError
 
 # No direct imports of API/storage needed in flow
 
@@ -42,14 +44,29 @@ class GoveeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle the initial step."""
         errors = {}
         if user_input is not None:
-            data = {
-                CONF_IOT_EMAIL: user_input.get(CONF_IOT_EMAIL, ""),
-                CONF_IOT_PASSWORD: user_input.get(CONF_IOT_PASSWORD, ""),
-                CONF_IOT_PUSH_ENABLED: True,
-                CONF_IOT_CONTROL_ENABLED: True,
-                CONF_DELAY: user_input.get(CONF_DELAY, 0),
-            }
-            return self.async_create_entry(title="Govee", data=data)
+            email = user_input.get(CONF_IOT_EMAIL, "")
+            password = user_input.get(CONF_IOT_PASSWORD, "")
+            try:
+                acct = await self.hass.async_add_executor_job(_login, email, password)
+                token = _extract_token(acct)
+                if token:
+                    data = {
+                        CONF_IOT_EMAIL: email,
+                        CONF_IOT_PASSWORD: password,
+                        CONF_IOT_PUSH_ENABLED: True,
+                        CONF_IOT_CONTROL_ENABLED: True,
+                        CONF_DELAY: user_input.get(CONF_DELAY, 0),
+                    }
+                    return self.async_create_entry(title="Govee", data=data)
+                errors["base"] = "invalid_auth"
+            except GoveeLoginError as ex:
+                _LOGGER.warning("Govee login failed: %s", ex)
+                errors["base"] = "invalid_auth"
+            except requests.RequestException:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected exception during credential validation")
+                errors["base"] = "unknown"
 
         # Single-step: IoT credentials (and optional delay)
         return self.async_show_form(
@@ -154,12 +171,26 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_iot(self, user_input=None):
         errors = {}
         if user_input is not None:
-            # Merge pending options first, if present
-            if self._pending_options is not None:
-                self.options.update(self._pending_options)
-                self._pending_options = None
-            self.options.update(user_input)
-            return self.async_create_entry(title="Govee", data=self.options)
+            email = user_input.get(CONF_IOT_EMAIL, "")
+            password = user_input.get(CONF_IOT_PASSWORD, "")
+            try:
+                acct = await self.hass.async_add_executor_job(_login, email, password)
+                token = _extract_token(acct)
+                if token:
+                    if self._pending_options is not None:
+                        self.options.update(self._pending_options)
+                        self._pending_options = None
+                    self.options.update(user_input)
+                    return self.async_create_entry(title="Govee", data=self.options)
+                errors["base"] = "invalid_auth"
+            except GoveeLoginError as ex:
+                _LOGGER.warning("Govee login failed: %s", ex)
+                errors["base"] = "invalid_auth"
+            except requests.RequestException:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected exception during credential validation")
+                errors["base"] = "unknown"
         iot_schema = vol.Schema(
             {
                 vol.Required(CONF_IOT_EMAIL, default=self.entry.options.get(CONF_IOT_EMAIL, "")): cv.string,
