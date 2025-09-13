@@ -113,27 +113,19 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
         errors = {}
 
         if user_input is not None:
-            try:
-                # Ensure IoT flags are set by default
-                user_input[CONF_IOT_PUSH_ENABLED] = True
-                user_input[CONF_IOT_CONTROL_ENABLED] = True
-            except CannotConnect as conn_ex:
-                _LOGGER.exception("Cannot connect: %s", conn_ex)
-                errors["base"] = "cannot_connect"
-            except Exception as ex:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected exception: %s", ex)
-                errors["base"] = "unknown"
+            # Ensure IoT flags are set by default
+            user_input[CONF_IOT_PUSH_ENABLED] = True
+            user_input[CONF_IOT_CONTROL_ENABLED] = True
 
-            if not errors:
-                # Collect credentials if missing
-                email = user_input.get(CONF_IOT_EMAIL) or self.entry.options.get(CONF_IOT_EMAIL, "")
-                password = user_input.get(CONF_IOT_PASSWORD) or self.entry.options.get(CONF_IOT_PASSWORD, "")
-                if not email or not password:
-                    self._pending_options = dict(self.options)
-                    self._pending_options.update(user_input)
-                    return await self.async_step_iot()
-                self.options.update(user_input)
-                return self.async_create_entry(title="Govee", data=self.options)
+            # Collect credentials if missing
+            email = user_input.get(CONF_IOT_EMAIL) or self.entry.options.get(CONF_IOT_EMAIL, "")
+            password = user_input.get(CONF_IOT_PASSWORD) or self.entry.options.get(CONF_IOT_PASSWORD, "")
+            if not email or not password:
+                self._pending_options = dict(self.options)
+                self._pending_options.update(user_input)
+                return await self.async_step_iot()
+            self.options.update(user_input)
+            return self.async_create_entry(title="Govee", data=self.options)
 
         # Build schema every time (not just on error)
         options_schema = vol.Schema(

@@ -640,7 +640,6 @@ class GoveeClient:
             if not support_cmds and not any([derived_turn, derived_brightness, derived_color, derived_ct]):
                 derived_turn = True
                 derived_brightness = True
-                derived_color = True
 
             # Treat None as unknown/true for controllable/retrievable when mobile API omits flags
             controllable_flag = item.get("controllable")
@@ -954,8 +953,14 @@ class GoveeClient:
             getattr(dev, "device", device), value, kelvin, vmin, vmax, step,
         )
 
-        ok, err = await self._debounced_control(dev or device, "colorTem", kelvin)
-
+        send_val = kelvin
+        if dev and dev.color_temp_send_percent:
+            vmin = dev.color_temp_min or 2700
+            vmax = dev.color_temp_max or 9000
+            rng = max(1, vmax - vmin)
+            pct = int(round((kelvin - vmin) / rng * 100))
+            send_val = max(0, min(100, pct))
+        ok, err = await self._debounced_control(dev or device, "colorTem", send_val)
         return ok, err
 
     async def _persist_learning(self):
