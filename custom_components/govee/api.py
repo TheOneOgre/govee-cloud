@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Tuple, Union
 
 from .models import GoveeDevice, GoveeSource, GoveeLearnedInfo
 from .const import CONF_IOT_EMAIL, CONF_IOT_PASSWORD
-from .iot_client import APP_VERSION, _ua
+from .iot_client import APP_VERSION, _ua, _login, _extract_token, GoveeLoginError
 from .quirks import resolve_quirk
 
 _LOGGER = logging.getLogger(__name__)
@@ -434,9 +434,8 @@ class GoveeClient:
         if not token:
             _LOGGER.debug("no login cache founds, logging in")
             try:
-                from .iot_client import _login  # type: ignore
                 acct = await asyncio.get_running_loop().run_in_executor(None, _login, email, password)
-                token = acct.get("token") or acct.get("accessToken")
+                token = _extract_token(acct)
                 # Persist token to the same IoT cache location for reuse across restarts
                 if token and self._hass:
                     try:
@@ -472,6 +471,9 @@ class GoveeClient:
                         await loop.run_in_executor(None, _persist_token, cache_dir, payload)
                     except Exception:
                         pass
+            except GoveeLoginError as ex:
+                _LOGGER.warning("Govee login failed: %s", ex)
+                token = None
             except Exception:
                 token = None
         if not token:
@@ -638,7 +640,6 @@ class GoveeClient:
             if not support_cmds and not any([derived_turn, derived_brightness, derived_color, derived_ct]):
                 derived_turn = True
                 derived_brightness = True
-                derived_color = True
 
             # Treat None as unknown/true for controllable/retrievable when mobile API omits flags
             controllable_flag = item.get("controllable")
@@ -952,8 +953,14 @@ class GoveeClient:
             getattr(dev, "device", device), value, kelvin, vmin, vmax, step,
         )
 
-        ok, err = await self._debounced_control(dev or device, "colorTem", kelvin)
-
+        send_val = kelvin
+        if dev and dev.color_temp_send_percent:
+            vmin = dev.color_temp_min or 2700
+            vmax = dev.color_temp_max or 9000
+            rng = max(1, vmax - vmin)
+            pct = int(round((kelvin - vmin) / rng * 100))
+            send_val = max(0, min(100, pct))
+        ok, err = await self._debounced_control(dev or device, "colorTem", send_val)
         return ok, err
 
     async def _persist_learning(self):
