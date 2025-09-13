@@ -20,6 +20,15 @@ from paho.mqtt.client import Client as MqttClient
 
 from .const import DOMAIN, CONF_IOT_EMAIL, CONF_IOT_PASSWORD, CONF_IOT_PUSH_ENABLED
 
+
+class GoveeLoginError(Exception):
+    """Raised when Govee login fails."""
+
+    def __init__(self, message: str, code: int | None = None):
+        self.code = code
+        text = f"{message} (code={code})" if code is not None else message
+        super().__init__(text)
+
 _LOGGER = logging.getLogger(__name__)
 
 APP_VERSION = "5.6.01"
@@ -44,6 +53,32 @@ def _client_id(email: str) -> str:
     return uuid.uuid5(uuid.NAMESPACE_DNS, email).hex
 
 
+def _extract_token(payload: Dict[str, Any]) -> str | None:
+    """Extract a token value from various possible fields."""
+
+    if not isinstance(payload, dict):
+        return None
+    token_keys = ["token", "accessToken", "authToken", "tokenValue"]
+    for key in token_keys:
+        token = payload.get(key)
+        if isinstance(token, str) and token:
+            _LOGGER.debug("Login token found under key '%s'", key)
+            return token
+
+    # Common containers for tokens observed in various API responses
+    for container_key in ("data", "client"):
+        nested = payload.get(container_key)
+        if isinstance(nested, dict):
+            token = _extract_token(nested)
+            if token:
+                return token
+
+    nested = payload.get("data")
+    if isinstance(nested, dict):
+        return _extract_token(nested)
+    return None
+
+
 def _login(email: str, password: str) -> Dict[str, Any]:
     resp = requests.post(
         "https://app2.govee.com/account/rest/account/v1/login",
@@ -52,11 +87,17 @@ def _login(email: str, password: str) -> Dict[str, Any]:
     )
     resp.raise_for_status()
     data = resp.json()
+    token = _extract_token(data)
     client = data.get("client") or data.get("data") or data
     t = client.get("topic")
     if isinstance(t, dict) and "value" in t:
         client["topic"] = t["value"]
-    return client
+    if token:
+        client.setdefault("token", token)
+        return client
+    err_msg = data.get("message") or data.get("msg") or "no token in response"
+    code = data.get("code")
+    raise GoveeLoginError(err_msg, code)
 
 
 def _get_iot_key(token: str, email: str) -> Dict[str, Any]:
@@ -142,6 +183,19 @@ class GoveeIoTClient:
         needed = tokens - self._pub_bucket_tokens
         wait = needed / self._pub_bucket_refill_per_sec if self._pub_bucket_refill_per_sec > 0 else 0.0
         return max(0.0, wait)
+
+    def _publish(self, topic: str, payload: dict) -> bool:
+        try:
+            js = __import__('json').dumps(payload, separators=(',', ':'))
+            try:
+                _LOGGER.debug("IoT publish topic=%s payload=%s", topic, js)
+            except Exception:
+                pass
+            self._iot.mqtt.publish(topic, js, qos=0, retain=False)
+            return True
+        except Exception as ex:
+            _LOGGER.debug("IoT publish failed: %s", ex)
+            return False
 
     async def start(self):
         opts = self._entry.options
@@ -231,9 +285,13 @@ class GoveeIoTClient:
                 if cached and (now_mono - cached[1]) < _CACHE_TTL_SEC:
                     acct = cached[0]
                 else:
-                    acct = await loop.run_in_executor(None, _login, email, password)
-                    _APP_LOGIN_CACHE[email] = (acct, now_mono)
-                token = acct.get("token") or acct.get("accessToken")
+                    try:
+                        acct = await loop.run_in_executor(None, _login, email, password)
+                        _APP_LOGIN_CACHE[email] = (acct, now_mono)
+                    except GoveeLoginError as ex:
+                        _LOGGER.warning("Govee IoT login failed: %s", ex)
+                        return
+                token = _extract_token(acct)
                 if not token:
                     _LOGGER.warning("Govee IoT: no token from login response")
                     return
@@ -688,38 +746,108 @@ class GoveeIoTClient:
         if command == "turn":
             msg["cmd"] = "turn"
             msg["data"] = {"val": 1 if str(value).lower() == "on" else 0}
-        elif command == "brightness":
+            payload = {"msg": msg}
+            return self._publish(topic, payload)
+        if command == "brightness":
             msg["cmd"] = "brightness"
             msg["data"] = {"val": int(value)}
-        elif command == "color":
-            # Use colorwc for broader device compatibility; include CT=0
+            payload = {"msg": msg}
+            return self._publish(topic, payload)
+        if command == "color":
+            r = int(value.get("r", 0))
+            g = int(value.get("g", 0))
+            b = int(value.get("b", 0))
+            dev = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
+            use_wc = getattr(dev, "color_cmd_use_colorwc", None)
+            if use_wc is False:
+                msg["cmd"] = "color"
+                msg["data"] = {"r": r, "g": g, "b": b}
+                payload = {"msg": msg}
+                return self._publish(topic, payload)
+            # default: try colorwc first
             msg["cmd"] = "colorwc"
-            msg["data"] = {
-                "color": {
-                    "r": int(value.get("r", 0)),
-                    "g": int(value.get("g", 0)),
-                    "b": int(value.get("b", 0)),
-                },
-                "colorTemInKelvin": 0,
-            }
-        elif command == "colorTem":
-            msg["cmd"] = "colorwc"
-            msg["data"] = {"color": {"r": 0, "g": 0, "b": 0}, "colorTemInKelvin": int(value)}
-        else:
-            return False
-        payload = {"msg": msg}
-        try:
-            js = __import__('json').dumps(payload, separators=(',', ':'))
-            try:
-                _LOGGER.debug("IoT publish topic=%s payload=%s", topic, js)
-            except Exception:
-                pass
-            # QoS 0 like the app
-            self._iot.mqtt.publish(topic, js, qos=0, retain=False)
+            msg["data"] = {"color": {"r": r, "g": g, "b": b}, "colorTemInKelvin": 0}
+            payload = {"msg": msg}
+            ok = self._publish(topic, payload)
+            if not ok:
+                return False
+            if dev and use_wc is None:
+                try:
+                    await asyncio.sleep(0.8)
+                except asyncio.CancelledError:
+                    return True
+                state = self._seen_devices.get(device_id, {}).get("color")
+                rgb_state = None
+                if isinstance(state, dict):
+                    rgb_state = (
+                        int(state.get("r", 0)),
+                        int(state.get("g", 0)),
+                        int(state.get("b", 0)),
+                    )
+                elif isinstance(state, list) and len(state) >= 3:
+                    rgb_state = tuple(int(c) for c in state[:3])
+                if rgb_state == (r, g, b):
+                    dev.color_cmd_use_colorwc = True
+                    return True
+                # fallback to legacy color command
+                msg2 = {
+                    "cmd": "color",
+                    "data": {"r": r, "g": g, "b": b},
+                    "cmdVersion": 1,
+                    "transaction": f"v_{_ms_ts()}000",
+                    "type": 1,
+                }
+                if self._account_topic:
+                    msg2["accountTopic"] = self._account_topic
+                payload2 = {"msg": msg2}
+                self._publish(topic, payload2)
+                dev.color_cmd_use_colorwc = False
             return True
-        except Exception as ex:
-            _LOGGER.debug("IoT publish failed: %s", ex)
-            return False
+        if command == "colorTem":
+            dev = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
+            send_percent = getattr(dev, "color_temp_send_percent", None)
+            kelvin = int(value)
+            if send_percent is True:
+                msg["cmd"] = "colorTem"
+                msg["data"] = {"colorTem": kelvin}
+                payload = {"msg": msg}
+                return self._publish(topic, payload)
+            # default: try Kelvin via colorwc
+            msg["cmd"] = "colorwc"
+            msg["data"] = {"color": {"r": 0, "g": 0, "b": 0}, "colorTemInKelvin": kelvin}
+            payload = {"msg": msg}
+            ok = self._publish(topic, payload)
+            if not ok:
+                return False
+            if dev and send_percent is None:
+                try:
+                    await asyncio.sleep(0.8)
+                except asyncio.CancelledError:
+                    return True
+                state = self._seen_devices.get(device_id, {}).get("colorTemInKelvin")
+                if isinstance(state, (int, float)) and int(state) == kelvin:
+                    dev.color_temp_send_percent = False
+                    return True
+                # fallback to percent-based command
+                vmin = dev.color_temp_min or 2700
+                vmax = dev.color_temp_max or 9000
+                rng = max(1, vmax - vmin)
+                percent = int(round((kelvin - vmin) / rng * 100))
+                percent = max(0, min(100, percent))
+                msg2 = {
+                    "cmd": "colorTem",
+                    "data": {"colorTem": percent},
+                    "cmdVersion": 1,
+                    "transaction": f"v_{_ms_ts()}000",
+                    "type": 1,
+                }
+                if self._account_topic:
+                    msg2["accountTopic"] = self._account_topic
+                payload2 = {"msg": msg2}
+                self._publish(topic, payload2)
+                dev.color_temp_send_percent = True
+            return True
+        return False
 
     async def async_request_status(self, device_id: str) -> bool:
         """Request status via device topic to seed state at startup."""

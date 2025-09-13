@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Tuple, Union
 
 from .models import GoveeDevice, GoveeSource, GoveeLearnedInfo
 from .const import CONF_IOT_EMAIL, CONF_IOT_PASSWORD
-from .iot_client import APP_VERSION, _ua
+from .iot_client import APP_VERSION, _ua, _login, _extract_token, GoveeLoginError
 from .quirks import resolve_quirk
 
 _LOGGER = logging.getLogger(__name__)
@@ -434,9 +434,8 @@ class GoveeClient:
         if not token:
             _LOGGER.debug("no login cache founds, logging in")
             try:
-                from .iot_client import _login  # type: ignore
                 acct = await asyncio.get_running_loop().run_in_executor(None, _login, email, password)
-                token = acct.get("token") or acct.get("accessToken")
+                token = _extract_token(acct)
                 # Persist token to the same IoT cache location for reuse across restarts
                 if token and self._hass:
                     try:
@@ -472,6 +471,9 @@ class GoveeClient:
                         await loop.run_in_executor(None, _persist_token, cache_dir, payload)
                     except Exception:
                         pass
+            except GoveeLoginError as ex:
+                _LOGGER.warning("Govee login failed: %s", ex)
+                token = None
             except Exception:
                 token = None
         if not token:
@@ -593,7 +595,9 @@ class GoveeClient:
                     if key in props and isinstance(props[key], dict):
                         _parse_range_dict(props[key].get("range"))
 
-            support_cmds = item.get("supportCmds", [])
+            support_cmds = [
+                cmd.lower() for cmd in item.get("supportCmds", []) if isinstance(cmd, str)
+            ]
             # Apply model-specific quirks if known
             model = item.get("model") or item.get("sku") or item.get("type") or "unknown"
             quirk = resolve_quirk(model) if model else None
@@ -638,7 +642,6 @@ class GoveeClient:
             if not support_cmds and not any([derived_turn, derived_brightness, derived_color, derived_ct]):
                 derived_turn = True
                 derived_brightness = True
-                derived_color = True
 
             # Treat None as unknown/true for controllable/retrievable when mobile API omits flags
             controllable_flag = item.get("controllable")
@@ -654,8 +657,14 @@ class GoveeClient:
                 dev_obj.support_cmds = support_cmds
                 dev_obj.support_turn = ("turn" in support_cmds) or derived_turn
                 dev_obj.support_brightness = ("brightness" in support_cmds) or derived_brightness
-                dev_obj.support_color = ("color" in support_cmds) or derived_color
-                dev_obj.support_color_temp = ("colorTem" in support_cmds) or derived_ct or (ct_min is not None or ct_max is not None)
+                if support_cmds or derived_color:
+                    dev_obj.support_color = (
+                        "color" in support_cmds or "colorwc" in support_cmds or derived_color
+                    )
+                if support_cmds or derived_ct or (ct_min is not None or ct_max is not None):
+                    dev_obj.support_color_temp = (
+                        "colortem" in support_cmds or derived_ct or (ct_min is not None or ct_max is not None)
+                    )
                 dev_obj.color_temp_min = ct_min
                 dev_obj.color_temp_max = ct_max
                 dev_obj.color_temp_step = ct_step or 1
@@ -679,9 +688,13 @@ class GoveeClient:
                     support_cmds=support_cmds,
                     support_turn=("turn" in support_cmds) or derived_turn,
                     support_brightness=("brightness" in support_cmds) or derived_brightness,
-                    support_color=("color" in support_cmds) or derived_color,
+                    support_color=(
+                        "color" in support_cmds or "colorwc" in support_cmds or derived_color
+                    ),
                     # Consider color temp supported if API lists command OR we detected a CT range
-                    support_color_temp=("colorTem" in support_cmds) or derived_ct or (ct_min is not None or ct_max is not None),
+                    support_color_temp=(
+                        "colortem" in support_cmds or derived_ct or (ct_min is not None or ct_max is not None)
+                    ),
                     color_temp_min=ct_min,
                     color_temp_max=ct_max,
                     color_temp_step=ct_step or 1,
@@ -787,7 +800,8 @@ class GoveeClient:
             return False, f"Device {device.device} not controllable"
         # Gate by known capabilities only. If capabilities are unknown (common with mobile list),
         # optimistically allow commands and let the API return an error if unsupported.
-        if command not in (device.support_cmds or []):
+        command_l = command.lower()
+        if command_l not in (device.support_cmds or []):
             support_known = bool(device.support_cmds) or any(
                 [
                     device.support_turn,
@@ -797,13 +811,13 @@ class GoveeClient:
                 ]
             )
             if support_known:
-                if command == "turn" and not device.support_turn:
+                if command_l == "turn" and not device.support_turn:
                     return False, f"Command {command} not supported"
-                if command == "brightness" and not device.support_brightness:
+                if command_l == "brightness" and not device.support_brightness:
                     return False, f"Command {command} not supported"
-                if command == "color" and not device.support_color:
+                if command_l == "color" and not device.support_color:
                     return False, f"Command {command} not supported"
-                if command == "colorTem" and not device.support_color_temp:
+                if command_l == "colortem" and not device.support_color_temp:
                     return False, f"Command {command} not supported"
 
         payload = {
@@ -952,8 +966,14 @@ class GoveeClient:
             getattr(dev, "device", device), value, kelvin, vmin, vmax, step,
         )
 
-        ok, err = await self._debounced_control(dev or device, "colorTem", kelvin)
-
+        send_val = kelvin
+        if dev and dev.color_temp_send_percent:
+            vmin = dev.color_temp_min or 2700
+            vmax = dev.color_temp_max or 9000
+            rng = max(1, vmax - vmin)
+            pct = int(round((kelvin - vmin) / rng * 100))
+            send_val = max(0, min(100, pct))
+        ok, err = await self._debounced_control(dev or device, "colorTem", send_val)
         return ok, err
 
     async def _persist_learning(self):
