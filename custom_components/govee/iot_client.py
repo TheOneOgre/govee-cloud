@@ -64,7 +64,6 @@ def _extract_token(payload: Dict[str, Any]) -> str | None:
         if isinstance(token, str) and token:
             _LOGGER.debug("Login token found under key '%s'", key)
             return token
-        codex/investigate-govee-login-failure-handling-ua7guo
 
     # Common containers for tokens observed in various API responses
     for container_key in ("data", "client"):
@@ -77,7 +76,6 @@ def _extract_token(payload: Dict[str, Any]) -> str | None:
     nested = payload.get("data")
     if isinstance(nested, dict):
         return _extract_token(nested)
-        iotmqtt
     return None
 
 
