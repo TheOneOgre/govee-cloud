@@ -40,6 +40,8 @@ class GoveeDevice:
     learned_color_temp_max: Optional[int] = None
     # Some models expect color temperature as 0-100 percent instead of Kelvin
     color_temp_send_percent: Optional[bool] = None
+    # Some models require 'colorwc' IoT command instead of legacy 'color'
+    color_cmd_use_colorwc: Optional[bool] = None
     timestamp: int = 0
     source: GoveeSource = GoveeSource.HISTORY
     error: Optional[str] = None
