@@ -167,6 +167,9 @@ class GoveeIoTClient:
         self._pub_bucket_refill_per_sec: float = self._pub_bucket_capacity / 60.0
         self._pub_bucket_tokens: float = self._pub_bucket_capacity
         self._pub_bucket_last: float = time.monotonic()
+        # Simple duplicate suppression for IoT publishes
+        self._last_color_sent: dict[str, tuple[tuple[int,int,int], float]] = {}
+        self._last_ct_sent: dict[str, tuple[int, float]] = {}
 
     def _pub_bucket_take(self, tokens: float = 1.0) -> float:
         """Global IoT publish token bucket: return wait seconds if not enough tokens."""
@@ -688,14 +691,7 @@ class GoveeIoTClient:
             topic = self._account_topic
             if not topic:
                 return False
-            # Enforce global publish rate limit (20/min default)
-            wait = self._pub_bucket_take(1.0)
-            if wait > 0:
-                _LOGGER.debug("IoT publish throttled (status broadcast): waiting %.2fs", wait)
-                try:
-                    await asyncio.sleep(wait)
-                except asyncio.CancelledError:
-                    return False
+            # Do not consume control bucket for status broadcast
             msg = {
                 "cmd": "status",
                 "cmdVersion": 2,
@@ -749,7 +745,16 @@ class GoveeIoTClient:
         # Enforce global publish rate limit (20/min default)
         wait = self._pub_bucket_take(1.0)
         if wait > 0:
-            _LOGGER.debug("IoT publish throttled (control %s): waiting %.2fs", command, wait)
+            try:
+                _LOGGER.debug(
+                    "IoT publish throttled (control %s): waiting %.2fs (tokens=%.2f cap=%s)",
+                    command,
+                    wait,
+                    float(self._pub_bucket_tokens),
+                    int(self._pub_bucket_capacity),
+                )
+            except Exception:
+                pass
             try:
                 await asyncio.sleep(wait)
             except asyncio.CancelledError:
@@ -782,6 +787,16 @@ class GoveeIoTClient:
             dev = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
             use_wc = getattr(dev, "color_cmd_use_colorwc", None)
 
+            # Drop exact duplicate within 1s to avoid churn while dragging the color wheel
+            try:
+                now_mono = __import__('time').monotonic()
+                last = self._last_color_sent.get(device_id)
+                if last and last[0] == (r, g, b) and (now_mono - last[1]) < 1.0:
+                    _LOGGER.debug("IoT suppress duplicate color publish for %s rgb=%s", device_id, (r, g, b))
+                    return True
+            except Exception:
+                pass
+
             # Helper to read last seen RGB
             def _last_rgb():
                 state = self._seen_devices.get(device_id, {}).get("color")
@@ -810,6 +825,13 @@ class GoveeIoTClient:
                     pass
                 # Poll quickly for confirmation; break early when matched
                 while _t.monotonic() < deadline:
+                    # Abort if a newer pending color supersedes this target
+                    try:
+                        if dev is not None and dev.pending_color is not None and tuple(dev.pending_color) != (r, g, b):
+                            _LOGGER.debug("IoT confirm aborted (superseded) for %s old=%s new=%s", device_id, (r,g,b), dev.pending_color)
+                            return False
+                    except Exception:
+                        pass
                     rgb_state = _last_rgb()
                     if rgb_state == (r, g, b):
                         if dev is not None:
@@ -822,6 +844,10 @@ class GoveeIoTClient:
                                 device_id,
                                 (r, g, b),
                             )
+                        except Exception:
+                            pass
+                        try:
+                            self._last_color_sent[device_id] = ((r, g, b), _t.monotonic())
                         except Exception:
                             pass
                         return True
@@ -845,9 +871,11 @@ class GoveeIoTClient:
             prefer_wc = (use_wc is not False)
             # First attempt
             if prefer_wc:
+                import time as _t
+                wc_deadline = _t.monotonic() + 5.0
                 msg["cmd"] = "colorwc"
-                # Send only the color field; omit colorTemInKelvin to avoid CT override
-                msg["data"] = {"color": {"r": r, "g": g, "b": b}}
+                # Include colorTemInKelvin=0 in color mode
+                msg["data"] = {"color": {"r": r, "g": g, "b": b}, "colorTemInKelvin": 0}
                 payload = {"msg": msg}
                 if not self._publish(topic, payload):
                     return False
@@ -855,6 +883,25 @@ class GoveeIoTClient:
                     if await _confirm_and_persist(True, 5.0):
                         return True
                     # Fallback attempt to legacy color
+                    # Hard guard: never fallback before full 5s window elapses
+                    try:
+                        nowm = _t.monotonic()
+                        if nowm < wc_deadline:
+                            _LOGGER.debug(
+                                "IoT skip legacy fallback (still within 5s window) for %s rgb=%s",
+                                device_id,
+                                (r, g, b),
+                            )
+                            return True
+                    except Exception:
+                        pass
+                    # Only fallback if still aiming for the same pending color
+                    try:
+                        if dev.pending_color is not None and tuple(dev.pending_color) != (r, g, b):
+                            _LOGGER.debug("IoT skip fallback legacy color; superseded %s -> %s", (r,g,b), dev.pending_color)
+                            return True
+                    except Exception:
+                        pass
                     try:
                         _LOGGER.debug(
                             "IoT fallback: trying legacy color after unconfirmed colorwc for %s rgb=%s",
@@ -878,6 +925,8 @@ class GoveeIoTClient:
                 return True
             else:
                 # Prefer legacy color but confirm and switch back if wrong
+                import time as _t
+                legacy_deadline = _t.monotonic() + 5.0
                 msg["cmd"] = "color"
                 msg["data"] = {"r": r, "g": g, "b": b}
                 payload = {"msg": msg}
@@ -887,6 +936,25 @@ class GoveeIoTClient:
                     if await _confirm_and_persist(False, 5.0):
                         return True
                     # Try colorwc if legacy didn't reflect correctly
+                    # Hard guard: never fallback before full 5s window elapses
+                    try:
+                        nowm = _t.monotonic()
+                        if nowm < legacy_deadline:
+                            _LOGGER.debug(
+                                "IoT skip colorwc fallback (still within 5s window) for %s rgb=%s",
+                                device_id,
+                                (r, g, b),
+                            )
+                            return True
+                    except Exception:
+                        pass
+                    # Only fallback if still aiming for the same pending color
+                    try:
+                        if dev.pending_color is not None and tuple(dev.pending_color) != (r, g, b):
+                            _LOGGER.debug("IoT skip fallback colorwc; superseded %s -> %s", (r,g,b), dev.pending_color)
+                            return True
+                    except Exception:
+                        pass
                     try:
                         _LOGGER.debug(
                             "IoT fallback: trying colorwc after unconfirmed legacy color for %s rgb=%s",
@@ -897,8 +965,8 @@ class GoveeIoTClient:
                         pass
                     msg2 = {
                         "cmd": "colorwc",
-                        # Send only the color field; omit colorTemInKelvin to avoid CT override
-                        "data": {"color": {"r": r, "g": g, "b": b}},
+                        # Include colorTemInKelvin=0 in color mode
+                        "data": {"color": {"r": r, "g": g, "b": b}, "colorTemInKelvin": 0},
                         "cmdVersion": 1,
                         "transaction": f"v_{_ms_ts()}000",
                         "type": 1,
@@ -918,11 +986,22 @@ class GoveeIoTClient:
                 import time as _t
                 deadline = _t.monotonic() + max(0.2, float(timeout))
                 while _t.monotonic() < deadline:
+                    # Abort if a newer pending CT supersedes this target
+                    try:
+                        if dev is not None and dev.pending_ct is not None and int(dev.pending_ct) != int(kelvin):
+                            _LOGGER.debug("IoT confirm CT aborted (superseded) for %s old=%s new=%s", device_id, kelvin, dev.pending_ct)
+                            return False
+                    except Exception:
+                        pass
                     v = self._seen_devices.get(device_id, {}).get("colorTemInKelvin")
                     if isinstance(v, (int, float)) and int(v) == kelvin:
                         if dev is not None:
                             # Memory-only: set in-device flag but do not persist to disk
                             dev.color_temp_send_percent = using_percent
+                        try:
+                            self._last_ct_sent[device_id] = (int(kelvin), _t.monotonic())
+                        except Exception:
+                            pass
                         return True
                     try:
                         await asyncio.sleep(0.2)
@@ -942,6 +1021,12 @@ class GoveeIoTClient:
                     if await _confirm_kelvin_and_persist(False, 5.0):
                         return True
                     # Try percent
+                    try:
+                        if dev.pending_ct is not None and int(dev.pending_ct) != int(kelvin):
+                            _LOGGER.debug("IoT skip percent fallback; CT superseded %s -> %s", kelvin, dev.pending_ct)
+                            return True
+                    except Exception:
+                        pass
                     vmin = dev.color_temp_min or 2700
                     vmax = dev.color_temp_max or 9000
                     rng = max(1, vmax - vmin)
@@ -971,6 +1056,12 @@ class GoveeIoTClient:
                     if await _confirm_kelvin_and_persist(True, 5.0):
                         return True
                     # Try Kelvin via colorwc if percent didn't reflect correctly
+                    try:
+                        if dev.pending_ct is not None and int(dev.pending_ct) != int(kelvin):
+                            _LOGGER.debug("IoT skip Kelvin fallback; CT superseded %s -> %s", kelvin, dev.pending_ct)
+                            return True
+                    except Exception:
+                        pass
                     msg2 = {
                         "cmd": "colorwc",
                         # Send only the color temperature field; omit the color field
@@ -994,14 +1085,7 @@ class GoveeIoTClient:
         topic = self._device_topics.get(device_id)
         if not topic:
             return False
-        # Enforce global publish rate limit (20/min default)
-        wait = self._pub_bucket_take(1.0)
-        if wait > 0:
-            _LOGGER.debug("IoT publish throttled (device status %s): waiting %.2fs", device_id, wait)
-            try:
-                await asyncio.sleep(wait)
-            except asyncio.CancelledError:
-                return False
+        # Do not consume control bucket for device status requests
         msg = {
             "cmd": "status",
             "cmdVersion": 2,

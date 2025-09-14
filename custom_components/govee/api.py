@@ -28,6 +28,8 @@ class _Coalescer:
         self._task: asyncio.Task | None = None
         self._future: asyncio.Future | None = None
         self._value: Any = None
+        # Sequence number to invalidate older runners that weren't canceled in time
+        self._seq: int = 0
 
     def schedule(self, value: Any, send_func):
         """Schedule send_func(value) after delay; return a Future of (ok, err)."""
@@ -36,12 +38,21 @@ class _Coalescer:
         if self._future is None or self._future.done():
             self._future = loop.create_future()
 
+        # Bump sequence so older runners (that may not cancel in time) become no-ops
+        self._seq += 1
+        my_seq = self._seq
         if self._task and not self._task.done():
-            self._task.cancel()
+            try:
+                self._task.cancel()
+            except Exception:
+                pass
 
         async def runner():
             try:
                 await asyncio.sleep(self.delay)
+                # If a newer schedule has occurred, skip sending
+                if my_seq != self._seq:
+                    return
                 # Capture current future to avoid race with reschedules
                 local_future = self._future
                 result = await send_func(self._value)
@@ -49,13 +60,14 @@ class _Coalescer:
                     ok, err = result
                 else:
                     ok, err = False, "Exception: invalid control handler result"
-                if local_future is not None and not local_future.done():
+                # Only the latest scheduled runner should resolve the future
+                if my_seq == self._seq and local_future is not None and not local_future.done():
                     local_future.set_result((ok, err))
             except asyncio.CancelledError:
                 return
             except Exception as ex:
                 local_future = getattr(self, "_future", None)
-                if local_future is not None and not local_future.done():
+                if my_seq == self._seq and local_future is not None and not local_future.done():
                     local_future.set_result((False, f"Exception: {ex}"))
             finally:
                 self._task = None
@@ -228,6 +240,12 @@ class GoveeClient:
         if co is None:
             co = _Coalescer(delay)
             self._coalesce[key] = co
+        else:
+            # Ensure the current call's desired delay is honored
+            try:
+                co.delay = float(delay)
+            except Exception:
+                pass
 
         async def _send_latest(v):
             # Drop exact duplicates sent within 2 seconds
@@ -238,18 +256,31 @@ class GoveeClient:
                 if last_val == v and (now - ts) < 2.0:
                     return True, None
 
+            # If IoT control is active, skip per-device REST token bucket gating
+            skip_bucket = False
+            try:
+                if self._hass and self._config_entry:
+                    from .const import DOMAIN  # type: ignore
+                    entry = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id)
+                    iot = entry and entry.get("iot_client")
+                    if iot and getattr(iot, "can_control", False):
+                        skip_bucket = True
+            except Exception:
+                skip_bucket = False
+
             # Limited retry loop for 429s
             attempts = 0
             while True:
-                # Gate each attempt by per-device token bucket (10/min default)
-                while True:
-                    wait = self._bucket_take(dev_id, 1.0)
-                    if wait <= 0:
-                        break
-                    try:
-                        await asyncio.sleep(wait)
-                    except asyncio.CancelledError:
-                        raise
+                # Gate each attempt by per-device token bucket (10/min default) unless IoT is active
+                if not skip_bucket:
+                    while True:
+                        wait = self._bucket_take(dev_id, 1.0)
+                        if wait <= 0:
+                            break
+                        try:
+                            await asyncio.sleep(wait)
+                        except asyncio.CancelledError:
+                            raise
                 ok, err = await self._control(device, command, v)
                 if ok:
                     self._last_sent[key] = (v, time.monotonic())
@@ -306,6 +337,7 @@ class GoveeClient:
             entry_id = self._config_entry.entry_id if self._config_entry else None
             iot = self._hass.data.get(DOMAIN, {}).get(entry_id or "", {}).get("iot_client") if (self._hass and entry_id) else None
             if iot:
+                # Broadcast a one-shot status request on account topic to seed push states
                 try:
                     if hasattr(iot, "async_broadcast_status_request"):
                         await iot.async_broadcast_status_request()
@@ -762,6 +794,7 @@ class GoveeClient:
             from .const import DOMAIN
             entry_id = self._config_entry.entry_id if self._config_entry else None
             iot = self._hass.data.get(DOMAIN, {}).get(entry_id or "", {}).get("iot_client") if (self._hass and entry_id) else None
+            # Request device status via device topics to seed state
             if iot and hasattr(iot, "async_request_status"):
                 for dev in devices:
                     try:
@@ -989,11 +1022,12 @@ class GoveeClient:
         # Defensive: only send if supported
         if not getattr(device, "support_color", False):
             return False, "Device does not support color"
+        # Longer debounce for color to wait for end-of-drag before sending
         return await self._debounced_control(device, "color", {
             "r": rgb[0],
             "g": rgb[1],
             "b": rgb[2]
-        })
+        }, delay=1.0)
 
     async def get_device_state(self, device_id: str) -> Tuple[bool, str | None]:
         """Fetch current state of a device via API."""

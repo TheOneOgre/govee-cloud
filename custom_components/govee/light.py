@@ -1,4 +1,5 @@
 """Govee light platform."""
+import asyncio
 import logging
 from datetime import timedelta
 
@@ -146,6 +147,9 @@ class GoveeLightEntity(LightEntity):
         self._title = title
         self._coordinator = coordinator
         self._device_id = device.device  # store only ID
+        # Local color debounce to avoid flooding while dragging the color wheel
+        self._color_task: asyncio.Task | None = None
+        self._color_debounce_s: float = 1.0
 
     @property
     def _device(self) -> GoveeDevice | None:
@@ -288,14 +292,30 @@ class GoveeLightEntity(LightEntity):
                     dev.pending_ct = 0
                 except Exception:
                     pass
-                ok, err = await self._hub.set_color(dev, col)
-                last_ok, last_err = ok, err
-                if ok or (err and isinstance(err, str) and err.startswith("Rate limit")):
-                    # Optimistically update on rate limit; reconciled via post-control poll
-                    dev.color = col
-                    dev.color_temp = 0
-                    dev.power_state = True
-                    dev.active_scene = None  # clear any prior effect/scene
+                # Cancel prior scheduled color send, if any, and schedule a new one
+                if self._color_task and not self._color_task.done():
+                    try:
+                        self._color_task.cancel()
+                    except Exception:
+                        pass
+                async def _send_after_delay(rgb):
+                    try:
+                        await asyncio.sleep(self._color_debounce_s)
+                    except asyncio.CancelledError:
+                        return
+                    try:
+                        ok2, err2 = await self._hub.set_color(dev, rgb)
+                        if not ok2 and err2:
+                            _LOGGER.debug("Delayed color send failed for %s: %s", dev.device, err2)
+                    except Exception as ex:
+                        _LOGGER.debug("Delayed color send exception for %s: %s", dev.device, ex)
+                self._color_task = asyncio.create_task(_send_after_delay(col))
+                # Optimistically update
+                dev.color = col
+                dev.color_temp = 0
+                dev.power_state = True
+                dev.active_scene = None  # clear any prior effect/scene
+                last_ok = True
         elif want_ct:
             # Accept both Kelvin (preferred) and mireds (deprecated) from HA
             if ATTR_COLOR_TEMP_KELVIN in kwargs:
