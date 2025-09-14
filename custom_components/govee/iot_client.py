@@ -375,27 +375,37 @@ class GoveeIoTClient:
         self._iot = iot_state
 
         def on_message(_client, _userdata, msg):
+            _LOGGER.debug("RAW MQTT message on %s: %s", msg.topic, msg.payload)
             try:
-                payload = msg.payload.decode("utf-8", errors="ignore")
+                payload = msg.payload
+                if isinstance(payload, bytes):
+                    payload = payload.decode("utf-8", errors="ignore")
+
                 data = json.loads(payload)
                 # Expect GA account messages containing device updates
                 if isinstance(data, dict) and data.get("device"):
                     device_id = data.get("device")
                     state = data.get("state") or {}
                     self._schedule_state_update(device_id, state)
+
                     # Track discovery
-                    try:
-                        if isinstance(device_id, str):
-                            self._seen_devices.setdefault(device_id, {})
-                            if isinstance(state, dict):
-                                self._seen_devices[device_id].update(state)
-                    except Exception:
-                        pass
+                    if isinstance(device_id, str):
+                        self._seen_devices.setdefault(device_id, {})
+                        if isinstance(state, dict):
+                            self._seen_devices[device_id].update(state)
+
             except Exception as ex:
                 _LOGGER.debug("IoT message parse failed: %s", ex)
 
+        self._connected_once = False
         def on_connect(_client, _userdata, _flags, rc):
-            _LOGGER.info("Govee IoT connected rc=%s", rc)
+            if rc != 0:
+                _LOGGER.error("connect failed rc=%s", rc)
+                return
+            if self._connected_once:
+                _LOGGER.debug("Already connected once, skipping re-subscribe")
+                return
+            self._connected_once = True
             try:
                 conn_event.set()
             except Exception:
@@ -455,6 +465,12 @@ class GoveeIoTClient:
                 pass
         except Exception as ex:
             _LOGGER.debug("Refresh device topics failed: %s", ex)
+        # Kick off a broadcast status request to seed all device states
+        try:
+            self._hass.async_create_task(self.async_broadcast_status_request())
+            _LOGGER.debug("Sent broadcast status request on account topic")
+        except Exception as ex:
+            _LOGGER.debug("Broadcast status request failed: %s", ex)
 
         # Final readiness summary
         try:
@@ -467,6 +483,9 @@ class GoveeIoTClient:
             )
         except Exception:
             pass
+    def on_disconnect(_client, _userdata, rc):
+        _LOGGER.warning("Govee IoT disconnected rc=%s", rc)
+        client.on_disconnect = on_disconnect
 
     def _schedule_state_update(self, device_id: str, state: Dict[str, Any]):
         async def _apply():
@@ -685,6 +704,9 @@ class GoveeIoTClient:
 
         Not all firmwares listen on account topic for status requests; best-effort.
         """
+        info = self._iot.mqtt.publish(topic, js, qos=0, retain=False)
+        _LOGGER.debug("Broadcast status publish mid=%s rc=%s", info.mid, info.rc)
+
         try:
             if not self._iot or not self._iot.mqtt:
                 return False
