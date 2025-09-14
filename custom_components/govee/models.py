@@ -70,3 +70,8 @@ class GoveeLearnedInfo:
     # Persist learned CT range overrides
     learned_color_temp_min: Optional[int] = None
     learned_color_temp_max: Optional[int] = None
+    # Persist learned per-device protocol quirks
+    # Some models require 'colorwc' instead of legacy 'color'
+    color_cmd_use_colorwc: Optional[bool] = None
+    # Some models expect color temperature as 0-100 percent instead of Kelvin
+    color_temp_send_percent: Optional[bool] = None

@@ -401,6 +401,17 @@ class GoveeIoTClient:
             if topic:
                 client.subscribe(topic, qos=0)
                 _LOGGER.info("Subscribed to account topic: %s", topic)
+            # Also subscribe to known device topics to catch direct device state messages
+            try:
+                for dev_topic in list(self._device_topics.values()):
+                    try:
+                        client.subscribe(dev_topic, qos=0)
+                    except Exception:
+                        pass
+                if self._device_topics:
+                    _LOGGER.debug("Subscribed to %d device topics", len(self._device_topics))
+            except Exception:
+                pass
 
         client.on_connect = on_connect
         client.on_message = on_message
@@ -426,6 +437,17 @@ class GoveeIoTClient:
             try:
                 # Detailed debug of topics mapping
                 _LOGGER.debug("IoT device topics map: %s", self._device_topics)
+            except Exception:
+                pass
+            # Subscribe to device topics after mapping refresh
+            try:
+                for dev_topic in list(self._device_topics.values()):
+                    try:
+                        client.subscribe(dev_topic, qos=0)
+                    except Exception:
+                        pass
+                if self._device_topics:
+                    _LOGGER.debug("Subscribed to %d device topics (post-refresh)", len(self._device_topics))
             except Exception:
                 pass
         except Exception as ex:
@@ -759,94 +781,210 @@ class GoveeIoTClient:
             b = int(value.get("b", 0))
             dev = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
             use_wc = getattr(dev, "color_cmd_use_colorwc", None)
-            if use_wc is False:
-                msg["cmd"] = "color"
-                msg["data"] = {"r": r, "g": g, "b": b}
-                payload = {"msg": msg}
-                return self._publish(topic, payload)
-            # default: try colorwc first
-            msg["cmd"] = "colorwc"
-            msg["data"] = {"color": {"r": r, "g": g, "b": b}, "colorTemInKelvin": 0}
-            payload = {"msg": msg}
-            ok = self._publish(topic, payload)
-            if not ok:
-                return False
-            if dev and use_wc is None:
-                try:
-                    await asyncio.sleep(0.8)
-                except asyncio.CancelledError:
-                    return True
+
+            # Helper to read last seen RGB
+            def _last_rgb():
                 state = self._seen_devices.get(device_id, {}).get("color")
-                rgb_state = None
                 if isinstance(state, dict):
-                    rgb_state = (
+                    return (
                         int(state.get("r", 0)),
                         int(state.get("g", 0)),
                         int(state.get("b", 0)),
                     )
-                elif isinstance(state, list) and len(state) >= 3:
-                    rgb_state = tuple(int(c) for c in state[:3])
-                if rgb_state == (r, g, b):
-                    dev.color_cmd_use_colorwc = True
-                    return True
-                # fallback to legacy color command
-                msg2 = {
-                    "cmd": "color",
-                    "data": {"r": r, "g": g, "b": b},
-                    "cmdVersion": 1,
-                    "transaction": f"v_{_ms_ts()}000",
-                    "type": 1,
-                }
-                if self._account_topic:
-                    msg2["accountTopic"] = self._account_topic
-                payload2 = {"msg": msg2}
-                self._publish(topic, payload2)
-                dev.color_cmd_use_colorwc = False
-            return True
+                if isinstance(state, list) and len(state) >= 3:
+                    return tuple(int(c) for c in state[:3])
+                return None
+
+            async def _confirm_and_persist(using_wc: bool, timeout: float = 5.0) -> bool:
+                import time as _t
+                deadline = _t.monotonic() + max(0.2, float(timeout))
+                try:
+                    _LOGGER.debug(
+                        "IoT confirm window start (%s) %.1fs for %s rgb=%s",
+                        "colorwc" if using_wc else "color",
+                        float(timeout),
+                        device_id,
+                        (r, g, b),
+                    )
+                except Exception:
+                    pass
+                # Poll quickly for confirmation; break early when matched
+                while _t.monotonic() < deadline:
+                    rgb_state = _last_rgb()
+                    if rgb_state == (r, g, b):
+                        if dev is not None:
+                            # Memory-only: set in-device flag but do not persist to disk
+                            dev.color_cmd_use_colorwc = using_wc
+                        try:
+                            _LOGGER.debug(
+                                "IoT confirmed via %s for %s rgb=%s",
+                                "colorwc" if using_wc else "color",
+                                device_id,
+                                (r, g, b),
+                            )
+                        except Exception:
+                            pass
+                        return True
+                    try:
+                        await asyncio.sleep(0.2)
+                    except asyncio.CancelledError:
+                        return True
+                try:
+                    _LOGGER.debug(
+                        "IoT confirm timed out via %s for %s after %.1fs; last=%s",
+                        "colorwc" if using_wc else "color",
+                        device_id,
+                        float(timeout),
+                        _last_rgb(),
+                    )
+                except Exception:
+                    pass
+                return False
+
+            # Choose preferred based on learned flag (default to colorwc)
+            prefer_wc = (use_wc is not False)
+            # First attempt
+            if prefer_wc:
+                msg["cmd"] = "colorwc"
+                # Send only the color field; omit colorTemInKelvin to avoid CT override
+                msg["data"] = {"color": {"r": r, "g": g, "b": b}}
+                payload = {"msg": msg}
+                if not self._publish(topic, payload):
+                    return False
+                if dev is not None:
+                    if await _confirm_and_persist(True, 5.0):
+                        return True
+                    # Fallback attempt to legacy color
+                    try:
+                        _LOGGER.debug(
+                            "IoT fallback: trying legacy color after unconfirmed colorwc for %s rgb=%s",
+                            device_id,
+                            (r, g, b),
+                        )
+                    except Exception:
+                        pass
+                    msg2 = {
+                        "cmd": "color",
+                        "data": {"r": r, "g": g, "b": b},
+                        "cmdVersion": 1,
+                        "transaction": f"v_{_ms_ts()}000",
+                        "type": 1,
+                    }
+                    if self._account_topic:
+                        msg2["accountTopic"] = self._account_topic
+                    payload2 = {"msg": msg2}
+                    self._publish(topic, payload2)
+                    await _confirm_and_persist(False, 5.0)
+                return True
+            else:
+                # Prefer legacy color but confirm and switch back if wrong
+                msg["cmd"] = "color"
+                msg["data"] = {"r": r, "g": g, "b": b}
+                payload = {"msg": msg}
+                if not self._publish(topic, payload):
+                    return False
+                if dev is not None:
+                    if await _confirm_and_persist(False, 5.0):
+                        return True
+                    # Try colorwc if legacy didn't reflect correctly
+                    try:
+                        _LOGGER.debug(
+                            "IoT fallback: trying colorwc after unconfirmed legacy color for %s rgb=%s",
+                            device_id,
+                            (r, g, b),
+                        )
+                    except Exception:
+                        pass
+                    msg2 = {
+                        "cmd": "colorwc",
+                        # Send only the color field; omit colorTemInKelvin to avoid CT override
+                        "data": {"color": {"r": r, "g": g, "b": b}},
+                        "cmdVersion": 1,
+                        "transaction": f"v_{_ms_ts()}000",
+                        "type": 1,
+                    }
+                    if self._account_topic:
+                        msg2["accountTopic"] = self._account_topic
+                    payload2 = {"msg": msg2}
+                    self._publish(topic, payload2)
+                    await _confirm_and_persist(True, 5.0)
+                return True
         if command == "colorTem":
             dev = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
             send_percent = getattr(dev, "color_temp_send_percent", None)
             kelvin = int(value)
-            if send_percent is True:
+
+            async def _confirm_kelvin_and_persist(using_percent: bool, timeout: float = 5.0) -> bool:
+                import time as _t
+                deadline = _t.monotonic() + max(0.2, float(timeout))
+                while _t.monotonic() < deadline:
+                    v = self._seen_devices.get(device_id, {}).get("colorTemInKelvin")
+                    if isinstance(v, (int, float)) and int(v) == kelvin:
+                        if dev is not None:
+                            # Memory-only: set in-device flag but do not persist to disk
+                            dev.color_temp_send_percent = using_percent
+                        return True
+                    try:
+                        await asyncio.sleep(0.2)
+                    except asyncio.CancelledError:
+                        return True
+                return False
+
+            prefer_kelvin_via_wc = (send_percent is not True)
+            if prefer_kelvin_via_wc:
+                msg["cmd"] = "colorwc"
+                # Send only the color temperature field; omit the color field
+                msg["data"] = {"colorTemInKelvin": kelvin}
+                payload = {"msg": msg}
+                if not self._publish(topic, payload):
+                    return False
+                if dev is not None:
+                    if await _confirm_kelvin_and_persist(False, 5.0):
+                        return True
+                    # Try percent
+                    vmin = dev.color_temp_min or 2700
+                    vmax = dev.color_temp_max or 9000
+                    rng = max(1, vmax - vmin)
+                    percent = int(round((kelvin - vmin) / rng * 100))
+                    percent = max(0, min(100, percent))
+                    msg2 = {
+                        "cmd": "colorTem",
+                        "data": {"colorTem": percent},
+                        "cmdVersion": 1,
+                        "transaction": f"v_{_ms_ts()}000",
+                        "type": 1,
+                    }
+                    if self._account_topic:
+                        msg2["accountTopic"] = self._account_topic
+                    payload2 = {"msg": msg2}
+                    self._publish(topic, payload2)
+                    await _confirm_kelvin_and_persist(True, 5.0)
+                return True
+            else:
+                # Prefer percent first, but correct if wrong
                 msg["cmd"] = "colorTem"
                 msg["data"] = {"colorTem": kelvin}
                 payload = {"msg": msg}
-                return self._publish(topic, payload)
-            # default: try Kelvin via colorwc
-            msg["cmd"] = "colorwc"
-            msg["data"] = {"color": {"r": 0, "g": 0, "b": 0}, "colorTemInKelvin": kelvin}
-            payload = {"msg": msg}
-            ok = self._publish(topic, payload)
-            if not ok:
-                return False
-            if dev and send_percent is None:
-                try:
-                    await asyncio.sleep(0.8)
-                except asyncio.CancelledError:
-                    return True
-                state = self._seen_devices.get(device_id, {}).get("colorTemInKelvin")
-                if isinstance(state, (int, float)) and int(state) == kelvin:
-                    dev.color_temp_send_percent = False
-                    return True
-                # fallback to percent-based command
-                vmin = dev.color_temp_min or 2700
-                vmax = dev.color_temp_max or 9000
-                rng = max(1, vmax - vmin)
-                percent = int(round((kelvin - vmin) / rng * 100))
-                percent = max(0, min(100, percent))
-                msg2 = {
-                    "cmd": "colorTem",
-                    "data": {"colorTem": percent},
-                    "cmdVersion": 1,
-                    "transaction": f"v_{_ms_ts()}000",
-                    "type": 1,
-                }
-                if self._account_topic:
-                    msg2["accountTopic"] = self._account_topic
-                payload2 = {"msg": msg2}
-                self._publish(topic, payload2)
-                dev.color_temp_send_percent = True
-            return True
+                if not self._publish(topic, payload):
+                    return False
+                if dev is not None:
+                    if await _confirm_kelvin_and_persist(True, 5.0):
+                        return True
+                    # Try Kelvin via colorwc if percent didn't reflect correctly
+                    msg2 = {
+                        "cmd": "colorwc",
+                        # Send only the color temperature field; omit the color field
+                        "data": {"colorTemInKelvin": kelvin},
+                        "cmdVersion": 1,
+                        "transaction": f"v_{_ms_ts()}000",
+                        "type": 1,
+                    }
+                    if self._account_topic:
+                        msg2["accountTopic"] = self._account_topic
+                    payload2 = {"msg": msg2}
+                    self._publish(topic, payload2)
+                    await _confirm_kelvin_and_persist(False, 5.0)
+                return True
         return False
 
     async def async_request_status(self, device_id: str) -> bool:

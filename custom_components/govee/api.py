@@ -230,17 +230,6 @@ class GoveeClient:
             self._coalesce[key] = co
 
         async def _send_latest(v):
-            # Enforce per-device 10/min budget without queuing outdated values.
-            # Coalescer will cancel this task if a newer value arrives while waiting.
-            while True:
-                wait = self._bucket_take(dev_id, 1.0)
-                if wait <= 0:
-                    break
-                try:
-                    await asyncio.sleep(wait)
-                except asyncio.CancelledError:
-                    raise
-
             # Drop exact duplicates sent within 2 seconds
             now = time.monotonic()
             last = self._last_sent.get(key)
@@ -252,7 +241,7 @@ class GoveeClient:
             # Limited retry loop for 429s
             attempts = 0
             while True:
-                # Gate each retry by token bucket as well
+                # Gate each attempt by per-device token bucket (10/min default)
                 while True:
                     wait = self._bucket_take(dev_id, 1.0)
                     if wait <= 0:
@@ -677,6 +666,7 @@ class GoveeClient:
                 dev_obj.learned_get_brightness_max = learned.get_brightness_max
                 dev_obj.before_set_brightness_turn_on = learned.before_set_brightness_turn_on
                 dev_obj.config_offline_is_off = learned.config_offline_is_off
+                # Do not restore protocol quirks from storage; re-learn each run (memory-only)
                 # Keep learned CT overrides untouched here; they are managed elsewhere
             else:
                 self._devices[dev_id] = GoveeDevice(
@@ -709,6 +699,7 @@ class GoveeClient:
                     config_offline_is_off=learned.config_offline_is_off,
                     learned_color_temp_min=None,
                     learned_color_temp_max=None,
+                    # Do not seed protocol quirk preferences from storage (memory-only learning)
                 )
 
         # If any devices still have MAC/ID as name, try the newer Platform API device list to enrich names
@@ -872,7 +863,7 @@ class GoveeClient:
                                     device.pending_color = (0, 0, 0)
                             except Exception:
                                 pass
-                            # Schedule post-control poll via REST less frequently to reconcile
+                            # Schedule a reconcile poll via REST less frequently to ensure UI sync
                             self._schedule_post_control_poll(device.device)
                             return True, None
             except Exception as ex:
@@ -988,6 +979,7 @@ class GoveeClient:
                     config_offline_is_off=dev.config_offline_is_off,
                     learned_color_temp_min=dev.learned_color_temp_min,
                     learned_color_temp_max=dev.learned_color_temp_max,
+                    # Do not persist protocol quirk preferences; memory-only
                 )
             await self._storage.write(infos)
         except Exception as ex:
