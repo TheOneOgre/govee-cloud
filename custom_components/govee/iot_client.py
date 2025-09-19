@@ -250,15 +250,27 @@ class GoveeIoTClient:
         try:
             if device_id:
                 ok, _ = await self._hub.get_device_state(device_id)
-                dev = self._hub._devices.get(device_id) if ok else None
-                online = getattr(dev, "online", None) if ok else None
-                self.mark_seen(device_id, online=online)
+                dev = self._hub._devices.get(device_id)
+                if ok:
+                    online = getattr(dev, "online", None) if dev else None
+                    self.mark_seen(device_id, online=online)
+                else:
+                    # REST fallback failed; treat as offline until IoT reports back.
+                    self.mark_seen(device_id, online=False)
+                    if dev and getattr(dev, "online", True):
+                        dev.online = False
             else:
                 for dev_id in list(getattr(self._hub, "_devices", {}).keys()):
                     ok, _ = await self._hub.get_device_state(dev_id)
-                    dev = self._hub._devices.get(dev_id) if ok else None
-                    online = getattr(dev, "online", None) if ok else None
-                    self.mark_seen(dev_id, online=online)
+                    dev = self._hub._devices.get(dev_id)
+                    if ok:
+                        online = getattr(dev, "online", None) if dev else None
+                        self.mark_seen(dev_id, online=online)
+                    else:
+                        # REST fallback failed; treat as offline until IoT reports back.
+                        self.mark_seen(dev_id, online=False)
+                        if dev and getattr(dev, "online", True):
+                            dev.online = False
         except Exception as ex:
             _LOGGER.debug("IoT fallback poll error: %s", ex)
             return False
@@ -499,7 +511,7 @@ class GoveeIoTClient:
         except Exception as ex:
             _LOGGER.warning("Govee IoT connect failed: %s", ex)
 
-        # Build device→topic map using the mobile device list API
+        # Build device->topic map using the mobile device list API
         try:
             await loop.run_in_executor(None, self._refresh_device_topics, token, email)
             _LOGGER.info("Loaded %s IoT device topics", len(self._device_topics))
@@ -531,6 +543,11 @@ class GoveeIoTClient:
                     self._offline_task = self._hass.async_create_task(self._offline_watchdog())
             except Exception:
                 self._offline_task = None
+        try:
+            # Seed state promptly so entities don't rely solely on MQTT pushes
+            self._hass.loop.call_soon_threadsafe(self._hass.async_create_task, self._poll_state_fallback())
+        except Exception:
+            self._hass.async_create_task(self._poll_state_fallback())
         def on_disconnect(_client, _userdata, rc, *, _self=self):
             _LOGGER.warning("Govee IoT disconnected rc=%s", rc)
             if rc != 0:
@@ -691,6 +708,7 @@ class GoveeIoTClient:
                         continue
                     last_seen = self._last_seen_wall.get(dev_id)
                     if last_seen is None:
+                        stale_ids.append(dev_id)
                         continue
                     try:
                         age = now_wall - float(last_seen)
