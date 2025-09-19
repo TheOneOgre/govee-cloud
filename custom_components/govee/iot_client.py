@@ -766,11 +766,13 @@ class GoveeIoTClient:
         self._hass.async_create_task(self.async_request_status(device_id, use_alt=try_alt))
 
     def _should_try_alt_status(self, device_id: str, misses: int) -> bool:
-        if not self._alt_status_models or misses <= 0:
+        if misses <= 0:
             return False
         dev = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
         model = (getattr(dev, "model", "") or "").upper()
-        return model in self._alt_status_models and misses >= 1
+        if model in self._alt_status_models:
+            return True
+        return misses >= 2
 
     def _build_status_payload(self, device_id: str, *, use_alt: bool = False) -> dict[str, Any]:
         msg = {

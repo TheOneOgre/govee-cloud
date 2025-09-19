@@ -4,7 +4,7 @@
       "user": {
         "title": "Govee Setup",
         "data": {
-          "iot_email": "Govee Username",
+          "iot_email": "Govee Email",
           "iot_password": "Govee Password",
           "delay": "Polling Delay (seconds, 0 = auto)"
         }
@@ -20,13 +20,20 @@
           "use_assumed_state": "Use Assumed State for history source",
           "offline_is_off": "Treat offline devices as off"
         }
+      },
+      "iot": {
+        "title": "Govee Credentials",
+        "data": {
+          "iot_email": "Govee Email",
+          "iot_password": "Govee Password"
+        }
       }
     }
   },
   "issues": {
     "missing_iot_credentials": {
       "title": "Govee: IoT credentials required",
-      "description": "This version of the Govee integration uses IoT for control and requires your Govee account email and password. Open Integrations → Govee → Configure and enter them."
+      "description": "This version of the Govee integration uses IoT for control and requires your Govee account email and password. Open [Integrations → Govee → Configure](/config/integrations/integration/govee) and enter them."
     }
   }
 }

@@ -112,14 +112,18 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_user(self, user_input=None):
         errors = {}
 
+        if user_input is None and not self._has_credentials():
+            self._pending_options = dict(self.options)
+            return await self.async_step_iot()
+
         if user_input is not None:
             # Ensure IoT flags are set by default
             user_input[CONF_IOT_PUSH_ENABLED] = True
             user_input[CONF_IOT_CONTROL_ENABLED] = True
 
             # Collect credentials if missing
-            email = user_input.get(CONF_IOT_EMAIL) or self.entry.options.get(CONF_IOT_EMAIL, "")
-            password = user_input.get(CONF_IOT_PASSWORD) or self.entry.options.get(CONF_IOT_PASSWORD, "")
+            email = user_input.get(CONF_IOT_EMAIL) or self._get_entry_value(CONF_IOT_EMAIL)
+            password = user_input.get(CONF_IOT_PASSWORD) or self._get_entry_value(CONF_IOT_PASSWORD)
             if not email or not password:
                 self._pending_options = dict(self.options)
                 self._pending_options.update(user_input)
@@ -173,6 +177,8 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
                         self.options.update(self._pending_options)
                         self._pending_options = None
                     self.options.update(user_input)
+                    self._persist_credentials(email, password)
+                    self._schedule_reload()
                     return self.async_create_entry(title="Govee", data=self.options)
                 errors["base"] = "invalid_auth"
             except GoveeLoginError as ex:
@@ -185,11 +191,28 @@ class GoveeOptionsFlowHandler(config_entries.OptionsFlow):
                 errors["base"] = "unknown"
         iot_schema = vol.Schema(
             {
-                vol.Required(CONF_IOT_EMAIL, default=self.entry.options.get(CONF_IOT_EMAIL, "")): cv.string,
-                vol.Required(CONF_IOT_PASSWORD, default=self.entry.options.get(CONF_IOT_PASSWORD, "")): cv.string,
+                vol.Required(CONF_IOT_EMAIL, default=self._get_entry_value(CONF_IOT_EMAIL)): cv.string,
+                vol.Required(CONF_IOT_PASSWORD, default=self._get_entry_value(CONF_IOT_PASSWORD)): cv.string,
             }
         )
         return self.async_show_form(step_id="iot", data_schema=iot_schema, errors=errors)
+
+    def _get_entry_value(self, key: str) -> str:
+        return self.entry.options.get(key) or self.entry.data.get(key, "")
+
+    def _has_credentials(self) -> bool:
+        return bool(self._get_entry_value(CONF_IOT_EMAIL) and self._get_entry_value(CONF_IOT_PASSWORD))
+
+    def _persist_credentials(self, email: str, password: str) -> None:
+        new_data = dict(self.entry.data)
+        new_data[CONF_IOT_EMAIL] = email
+        new_data[CONF_IOT_PASSWORD] = password
+        self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+
+    def _schedule_reload(self) -> None:
+        self.hass.async_create_task(
+            self.hass.config_entries.async_reload(self.entry.entry_id)
+        )
 
 
 
