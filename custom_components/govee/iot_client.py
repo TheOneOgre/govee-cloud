@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import base64
 import json
@@ -16,9 +17,8 @@ import certifi
 import requests
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from cryptography.hazmat.primitives.serialization.pkcs12 import load_key_and_certificates
-from paho.mqtt.client import Client as MqttClient
-
-from .const import DOMAIN, CONF_IOT_EMAIL, CONF_IOT_PASSWORD, CONF_IOT_PUSH_ENABLED
+from paho.mqtt.client import Client as MqttClient, MQTTMessageInfo
+from .const import DOMAIN, CONF_IOT_EMAIL, CONF_IOT_PASSWORD, CONF_IOT_PUSH_ENABLED, CONF_IOT_CONTROL_ENABLED
 
 
 class GoveeLoginError(Exception):
@@ -160,6 +160,10 @@ class GoveeIoTClient:
             self._email = None
         # Passive MQTT discovery cache (device_id -> last state payload)
         self._seen_devices: dict[str, dict] = {}
+        self._last_seen_wall: dict[str, float] = {}
+        self._offline_task: asyncio.Task | None = None
+        self._offline_timeout: float = 4 * 60.0  # seconds before marking device offline
+        self._offline_check_interval: float = 60.0
 
         # Global publish token bucket (max publishes per minute across all devices)
         # Default: 20/min
@@ -167,9 +171,29 @@ class GoveeIoTClient:
         self._pub_bucket_refill_per_sec: float = self._pub_bucket_capacity / 60.0
         self._pub_bucket_tokens: float = self._pub_bucket_capacity
         self._pub_bucket_last: float = time.monotonic()
+        self._loop: asyncio.AbstractEventLoop | None = None
         # Simple duplicate suppression for IoT publishes
         self._last_color_sent: dict[str, tuple[tuple[int,int,int], float]] = {}
         self._last_ct_sent: dict[str, tuple[int, float]] = {}
+        self._last_fallback_poll = 0.0
+        try:
+            opts = dict(entry.options) if isinstance(entry.options, dict) else dict(entry.options or {})
+        except Exception:
+            opts = {}
+        try:
+            data = dict(entry.data) if isinstance(entry.data, dict) else dict(entry.data or {})
+        except Exception:
+            data = {}
+        publish_opt = opts.get(CONF_IOT_CONTROL_ENABLED) if isinstance(opts, dict) else None
+        if publish_opt is None and isinstance(data, dict):
+            publish_opt = data.get(CONF_IOT_CONTROL_ENABLED)
+        # Default to allow publishing when option is unset (matches legacy behaviour)
+        self._allow_publish = True if publish_opt is None else bool(publish_opt)
+        if not self._allow_publish:
+            _LOGGER.debug("IoT control disabled via options or credentials")
+        self._publish_warned = False
+        self._last_publish_monotonic = 0.0
+
 
     def _pub_bucket_take(self, tokens: float = 1.0) -> float:
         """Global IoT publish token bucket: return wait seconds if not enough tokens."""
@@ -187,18 +211,64 @@ class GoveeIoTClient:
         wait = needed / self._pub_bucket_refill_per_sec if self._pub_bucket_refill_per_sec > 0 else 0.0
         return max(0.0, wait)
 
-    def _publish(self, topic: str, payload: dict) -> bool:
+    def _publish(self, topic: str, payload: dict, *, log_payload: bool = True) -> MQTTMessageInfo | None:
+        iot = self._iot
+        if not iot or not iot.mqtt:
+            return None
+        if not self._allow_publish:
+            if not self._publish_warned:
+                _LOGGER.debug("IoT publish skipped; MQTT credentials appear read-only")
+                self._publish_warned = True
+            return None
         try:
-            js = __import__('json').dumps(payload, separators=(',', ':'))
+            js = json.dumps(payload, separators=(",", ":"))
+            info = iot.mqtt.publish(topic, js, qos=0, retain=False)
+            self._last_publish_monotonic = time.monotonic()
             try:
-                _LOGGER.debug("IoT publish topic=%s payload=%s", topic, js)
+                if log_payload:
+                    _LOGGER.debug("IoT publish topic=%s mid=%s rc=%s payload=%s", topic, getattr(info, "mid", None), getattr(info, "rc", None), js)
+                else:
+                    _LOGGER.debug("IoT publish topic=%s mid=%s rc=%s", topic, getattr(info, "mid", None), getattr(info, "rc", None))
             except Exception:
                 pass
-            self._iot.mqtt.publish(topic, js, qos=0, retain=False)
-            return True
+            if getattr(info, "rc", 0) != 0:
+                return None
+            return info
         except Exception as ex:
             _LOGGER.debug("IoT publish failed: %s", ex)
+            return None
+
+    async def _poll_state_fallback(self, device_id: str | None = None) -> bool:
+        if not self._hub or not self._hass:
             return False
+        import time as _t
+        now = _t.monotonic()
+        if device_id is None:
+            if (now - self._last_fallback_poll) < 20.0:
+                return False
+            self._last_fallback_poll = now
+        try:
+            if device_id:
+                ok, _ = await self._hub.get_device_state(device_id)
+                dev = self._hub._devices.get(device_id) if ok else None
+                online = getattr(dev, "online", None) if ok else None
+                self.mark_seen(device_id, online=online)
+            else:
+                for dev_id in list(getattr(self._hub, "_devices", {}).keys()):
+                    ok, _ = await self._hub.get_device_state(dev_id)
+                    dev = self._hub._devices.get(dev_id) if ok else None
+                    online = getattr(dev, "online", None) if ok else None
+                    self.mark_seen(dev_id, online=online)
+        except Exception as ex:
+            _LOGGER.debug("IoT fallback poll error: %s", ex)
+            return False
+        entry_data = self._hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+        if entry_data and "coordinator" in entry_data:
+            try:
+                entry_data["coordinator"].async_set_updated_data(list(self._hub._devices.values()))
+            except Exception:
+                pass
+        return True
 
     async def start(self):
         opts = self._entry.options
@@ -220,6 +290,7 @@ class GoveeIoTClient:
             _LOGGER.debug("IoT missing credentials; skipping start")
             return
         loop = asyncio.get_running_loop()
+        self._loop = loop
         # Login and fetch IoT key in executor, with 15-day on-disk cache
         try:
             import json as _json
@@ -397,15 +468,11 @@ class GoveeIoTClient:
             except Exception as ex:
                 _LOGGER.debug("IoT message parse failed: %s", ex)
 
-        self._connected_once = False
         def on_connect(_client, _userdata, _flags, rc):
+            _LOGGER.info("Govee IoT connected rc=%s", rc)
             if rc != 0:
-                _LOGGER.error("connect failed rc=%s", rc)
+                _LOGGER.error("Govee IoT connect failed rc=%s", rc)
                 return
-            if self._connected_once:
-                _LOGGER.debug("Already connected once, skipping re-subscribe")
-                return
-            self._connected_once = True
             try:
                 conn_event.set()
             except Exception:
@@ -414,17 +481,6 @@ class GoveeIoTClient:
             if topic:
                 client.subscribe(topic, qos=0)
                 _LOGGER.info("Subscribed to account topic: %s", topic)
-            # Also subscribe to known device topics to catch direct device state messages
-            try:
-                for dev_topic in list(self._device_topics.values()):
-                    try:
-                        client.subscribe(dev_topic, qos=0)
-                    except Exception:
-                        pass
-                if self._device_topics:
-                    _LOGGER.debug("Subscribed to %d device topics", len(self._device_topics))
-            except Exception:
-                pass
 
         client.on_connect = on_connect
         client.on_message = on_message
@@ -452,26 +508,8 @@ class GoveeIoTClient:
                 _LOGGER.debug("IoT device topics map: %s", self._device_topics)
             except Exception:
                 pass
-            # Subscribe to device topics after mapping refresh
-            try:
-                for dev_topic in list(self._device_topics.values()):
-                    try:
-                        client.subscribe(dev_topic, qos=0)
-                    except Exception:
-                        pass
-                if self._device_topics:
-                    _LOGGER.debug("Subscribed to %d device topics (post-refresh)", len(self._device_topics))
-            except Exception:
-                pass
         except Exception as ex:
             _LOGGER.debug("Refresh device topics failed: %s", ex)
-        # Kick off a broadcast status request to seed all device states
-        try:
-            self._hass.async_create_task(self.async_broadcast_status_request())
-            _LOGGER.debug("Sent broadcast status request on account topic")
-        except Exception as ex:
-            _LOGGER.debug("Broadcast status request failed: %s", ex)
-
         # Final readiness summary
         try:
             _LOGGER.debug(
@@ -483,15 +521,66 @@ class GoveeIoTClient:
             )
         except Exception:
             pass
-    def on_disconnect(_client, _userdata, rc):
-        _LOGGER.warning("Govee IoT disconnected rc=%s", rc)
+        if not self._offline_task:
+            try:
+                creator = getattr(self._hass, "async_create_background_task", None)
+                if creator:
+                    # Ensure watchdog does not block Home Assistant bootstrap
+                    self._offline_task = creator(self._offline_watchdog(), name="govee_offline_watchdog")
+                else:
+                    self._offline_task = self._hass.async_create_task(self._offline_watchdog())
+            except Exception:
+                self._offline_task = None
+        def on_disconnect(_client, _userdata, rc, *, _self=self):
+            _LOGGER.warning("Govee IoT disconnected rc=%s", rc)
+            if rc != 0:
+                loop = _self._loop
+                if loop is not None:
+                    try:
+                        loop.call_soon_threadsafe(
+                            lambda: _self._hass.async_create_task(_self._poll_state_fallback())
+                        )
+                    except Exception:
+                        pass
+
         client.on_disconnect = on_disconnect
+
 
     def _schedule_state_update(self, device_id: str, state: Dict[str, Any]):
         async def _apply():
+            import time as _time
             dev = self._hub._devices.get(device_id)
             if not dev:
                 return
+            now_wall = _time.time()
+            try:
+                self._last_seen_wall[device_id] = now_wall
+            except Exception:
+                pass
+            try:
+                dev.timestamp = int(now_wall)
+            except Exception:
+                pass
+            online_flag = None
+            if isinstance(state, dict):
+                if "deviceOnline" in state:
+                    online_flag = state.get("deviceOnline")
+                elif "online" in state:
+                    online_flag = state.get("online")
+                elif "connected" in state:
+                    online_flag = state.get("connected")
+                elif isinstance(state.get("deviceStatus"), dict):
+                    ds = state["deviceStatus"]
+                    online_flag = ds.get("online")
+                    if online_flag is None:
+                        online_flag = ds.get("isOnline")
+                    if online_flag is None:
+                        online_flag = ds.get("connected")
+            if online_flag is not None:
+                if isinstance(online_flag, str):
+                    dev.online = online_flag.lower() == "true"
+                else:
+                    dev.online = bool(online_flag)
             # onOff
             if "onOff" in state:
                 try:
@@ -587,6 +676,60 @@ class GoveeIoTClient:
             # Fallback in case loop call fails (shouldn't on HA)
             asyncio.run_coroutine_threadsafe(_apply(), self._hass.loop)
 
+    async def _offline_watchdog(self):
+        try:
+            while True:
+                await asyncio.sleep(self._offline_check_interval)
+                if not self._hub or not getattr(self._hub, '_devices', None):
+                    continue
+                entry_data = self._hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+                coord = entry_data.get('coordinator') if entry_data else None
+                now_wall = time.time()
+                stale_ids: list[str] = []
+                for dev_id, dev in list(self._hub._devices.items()):
+                    if not getattr(dev, 'online', False):
+                        continue
+                    last_seen = self._last_seen_wall.get(dev_id)
+                    if last_seen is None:
+                        continue
+                    try:
+                        age = now_wall - float(last_seen)
+                    except Exception:
+                        age = 0.0
+                    if age > self._offline_timeout:
+                        stale_ids.append(dev_id)
+
+                if not stale_ids:
+                    continue
+
+                for dev_id in stale_ids:
+                    try:
+                        await self._poll_state_fallback(dev_id)
+                    except Exception:
+                        pass
+
+                changed = False
+                now_wall_post = time.time()
+                for dev_id in stale_ids:
+                    dev = self._hub._devices.get(dev_id)
+                    if not dev:
+                        continue
+                    last_seen = self._last_seen_wall.get(dev_id)
+                    try:
+                        age = now_wall_post - float(last_seen) if last_seen is not None else self._offline_timeout + 1
+                    except Exception:
+                        age = self._offline_timeout + 1
+                    if getattr(dev, 'online', False) and age > self._offline_timeout:
+                        dev.online = False
+                        changed = True
+
+                if changed and coord:
+                    try:
+                        coord.async_set_updated_data(list(self._hub._devices.values()))
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            return
     async def stop(self):
         if self._iot and self._iot.mqtt:
             try:
@@ -601,6 +744,18 @@ class GoveeIoTClient:
                         os.unlink(p)
                     except Exception:
                         pass
+
+        if self._offline_task:
+            task = self._offline_task
+            self._offline_task = None
+            try:
+                task.cancel()
+            except Exception:
+                pass
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        self._loop = None
 
     def _refresh_device_topics(self, token: str, email: str):
         # Prefer cached devices.json if fresh (15-day TTL)
@@ -681,9 +836,8 @@ class GoveeIoTClient:
 
     @property
     def can_control(self) -> bool:
-        # Consider control possible as soon as MQTT client exists; device topic and
-        # account topic are handled on-demand in publish.
-        return bool(self._iot and self._iot.mqtt)
+        # Only allow IoT control when MQTT is ready and publish permissions are enabled.
+        return bool(self._allow_publish and self._iot and self._iot.mqtt)
 
     def get_topics(self) -> dict[str, str]:
         """Return a copy of the device->topic mapping for diagnostics."""
@@ -699,38 +853,26 @@ class GoveeIoTClient:
         except Exception:
             return {}
 
-    async def async_broadcast_status_request(self) -> bool:
-        """Request statuses by publishing a status message to the account topic.
+    def mark_seen(self, device_id: str, when: float | None = None, *, online: bool | None = None) -> None:
+        try:
+            if online is False:
+                self._last_seen_wall.pop(device_id, None)
+            else:
+                self._last_seen_wall[device_id] = float(when) if when is not None else time.time()
+        except Exception:
+            pass
 
-        Not all firmwares listen on account topic for status requests; best-effort.
-        """
-        info = self._iot.mqtt.publish(topic, js, qos=0, retain=False)
-        _LOGGER.debug("Broadcast status publish mid=%s rc=%s", info.mid, info.rc)
+    async def async_broadcast_status_request(self) -> bool:
+        """Seed state using REST fallback when a broadcast is requested."""
 
         try:
-            if not self._iot or not self._iot.mqtt:
-                return False
-            topic = self._account_topic
-            if not topic:
-                return False
-            # Do not consume control bucket for status broadcast
-            msg = {
-                "cmd": "status",
-                "cmdVersion": 2,
-                "transaction": f"v_{_ms_ts()}000",
-                "type": 0,
-            }
-            payload = {"msg": msg}
-            js = __import__('json').dumps(payload, separators=(',', ':'))
-            try:
-                _LOGGER.debug("IoT broadcast status on account topic=%s payload=%s", topic, js)
-            except Exception:
-                pass
-            self._iot.mqtt.publish(topic, js, qos=0, retain=False)
-            return True
+            if await self._poll_state_fallback():
+                _LOGGER.debug("IoT broadcast status satisfied via REST fallback")
+                return True
         except Exception as ex:
-            _LOGGER.debug("IoT broadcast status failed: %s", ex)
-            return False
+            _LOGGER.debug("IoT broadcast status fallback failed: %s", ex)
+        return False
+
 
     async def async_publish_control(self, device_id: str, command: str, value: Any) -> bool:
         if not self.can_control:
@@ -739,6 +881,8 @@ class GoveeIoTClient:
                 _LOGGER.debug("IoT publish blocked: IoT state not initialized")
             elif not self._iot.mqtt:
                 _LOGGER.debug("IoT publish blocked: MQTT client missing")
+            elif not self._allow_publish:
+                _LOGGER.debug("IoT publish blocked: MQTT credentials are read-only")
             else:
                 _LOGGER.debug("IoT publish blocked: MQTT not ready")
             return False
@@ -796,12 +940,12 @@ class GoveeIoTClient:
             msg["cmd"] = "turn"
             msg["data"] = {"val": 1 if str(value).lower() == "on" else 0}
             payload = {"msg": msg}
-            return self._publish(topic, payload)
+            return bool(self._publish(topic, payload))
         if command == "brightness":
             msg["cmd"] = "brightness"
             msg["data"] = {"val": int(value)}
             payload = {"msg": msg}
-            return self._publish(topic, payload)
+            return bool(self._publish(topic, payload))
         if command == "color":
             r = int(value.get("r", 0))
             g = int(value.get("g", 0))
@@ -1101,25 +1245,46 @@ class GoveeIoTClient:
         return False
 
     async def async_request_status(self, device_id: str) -> bool:
-        """Request status via device topic to seed state at startup."""
-        if not self.can_control:
-            return False
-        topic = self._device_topics.get(device_id)
-        if not topic:
-            return False
-        # Do not consume control bucket for device status requests
-        msg = {
-            "cmd": "status",
-            "cmdVersion": 2,
-            "transaction": f"v_{_ms_ts()}000",
-            "type": 0,
-            # Some firmwares accept accountTopic inside msg, but for status it is optional
-        }
-        payload = {"msg": msg}
-        try:
-            js = __import__('json').dumps(payload, separators=(',', ':'))
-            self._iot.mqtt.publish(topic, js, qos=0, retain=False)
+        """Request device status over MQTT, falling back to REST if needed."""
+
+        mqtt_sent = False
+        if self.can_control:
+            topic = self._device_topics.get(device_id)
+            if topic:
+                wait = self._pub_bucket_take(1.0)
+                if wait > 0:
+                    _LOGGER.debug("IoT publish throttled (device status %s): waiting %.2fs", device_id, wait)
+                    try:
+                        await asyncio.sleep(wait)
+                    except asyncio.CancelledError:
+                        return False
+                msg = {
+                    "cmd": "status",
+                    "cmdVersion": 2,
+                    "transaction": f"v_{_ms_ts()}000",
+                    "type": 0,
+                }
+                payload = {"msg": msg}
+                try:
+                    if self._publish(topic, payload, log_payload=False):
+                        mqtt_sent = True
+                except Exception as ex:
+                    _LOGGER.debug("IoT status publish failed: %s", ex)
+        if mqtt_sent:
             return True
+        try:
+            if await self._poll_state_fallback(device_id):
+                _LOGGER.debug("IoT request status satisfied via REST fallback for %s", device_id)
+                return True
         except Exception as ex:
-            _LOGGER.debug("IoT status publish failed: %s", ex)
-            return False
+            _LOGGER.debug("IoT request status fallback failed for %s: %s", device_id, ex)
+        return False
+
+
+
+
+
+
+
+
+

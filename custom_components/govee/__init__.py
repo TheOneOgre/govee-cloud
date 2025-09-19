@@ -67,7 +67,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             _LOGGER.debug("Govee IoT not started: enabled=%s email=%s password=%s", enabled, bool(email), bool(password))
             # Proactively notify users migrating from API-key versions to IoT credentials
             try:
-                # Repairs issue (shows in Settings → Repairs) with deep link to Integrations
+                # Repairs issue (shows in Settings -> Repairs) with deep link to Integrations
                 from homeassistant.helpers import issue_registry as ir  # type: ignore
                 issue_registry = ir.async_get(hass)
                 issue_registry.async_create_issue(
@@ -84,8 +84,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             try:
                 # Persistent notification as a user-facing prompt
                 msg = (
-                    "Govee has switched to IoT-based control. Open Integrations → "
-                    "Govee → Configure and enter your Govee account email and password.\n\n"
+                    "Govee has switched to IoT-based control. Open Integrations -> "
+                    "Govee -> Configure and enter your Govee account email and password.\n\n"
                     "Quick link: /config/integrations/integration/govee"
                 )
                 await hass.services.async_call(
@@ -107,6 +107,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         _LOGGER.warning("Could not load Govee devices at startup: %s", err)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
     return True
 
 
@@ -138,3 +139,5 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Handle reload of a config entry."""
     await async_unload_entry(hass, entry)
     await async_setup_entry(hass, entry)
+
+

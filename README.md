@@ -63,6 +63,10 @@ Actual features depend on your device model; the integration infers capabilities
 
 ## Sponsor
 
+Major thanks to my sponsors for this project! 
+
+@androbro
+
 If this integration helps you, consider supporting development:
 
 <a href="https://www.buymeacoffee.com/theogre" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>

@@ -9,3 +9,7 @@ iot_bypass copy.py
 iot_bypass.py
 decomp/
 tests/
+.continue/
+goveeworkingmqtt/
+.iot_test_cache/
+iottest.py

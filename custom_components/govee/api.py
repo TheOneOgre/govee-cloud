@@ -9,7 +9,7 @@ from aiohttp import ClientSession
 from typing import Any, Dict, List, Tuple, Union
 
 from .models import GoveeDevice, GoveeSource, GoveeLearnedInfo
-from .const import CONF_IOT_EMAIL, CONF_IOT_PASSWORD
+from .const import CONF_IOT_EMAIL, CONF_IOT_PASSWORD, DOMAIN
 from .iot_client import APP_VERSION, _ua, _login, _extract_token, GoveeLoginError
 from .quirks import resolve_quirk
 
@@ -337,16 +337,6 @@ class GoveeClient:
             entry_id = self._config_entry.entry_id if self._config_entry else None
             iot = self._hass.data.get(DOMAIN, {}).get(entry_id or "", {}).get("iot_client") if (self._hass and entry_id) else None
             if iot:
-                # Broadcast a one-shot status request on account topic to seed push states
-                try:
-                    if hasattr(iot, "async_broadcast_status_request"):
-                        await iot.async_broadcast_status_request()
-                except Exception:
-                    pass
-                try:
-                    await asyncio.sleep(1.0)
-                except Exception:
-                    pass
                 topics = iot.get_topics() if hasattr(iot, "get_topics") else {}
                 seen = iot.get_known_devices() if hasattr(iot, "get_known_devices") else {}
                 device_ids = list(seen.keys()) or list(topics.keys())
@@ -794,8 +784,12 @@ class GoveeClient:
             from .const import DOMAIN
             entry_id = self._config_entry.entry_id if self._config_entry else None
             iot = self._hass.data.get(DOMAIN, {}).get(entry_id or "", {}).get("iot_client") if (self._hass and entry_id) else None
-            # Request device status via device topics to seed state
             if iot and hasattr(iot, "async_request_status"):
+                try:
+                    if getattr(iot, "can_control", False):
+                        await asyncio.sleep(0.3)
+                except Exception:
+                    pass
                 for dev in devices:
                     try:
                         await iot.async_request_status(dev.device)
@@ -1054,10 +1048,23 @@ class GoveeClient:
             new_color = None
             new_ct = None
             new_brightness = None
+            online_flag = None
             for p in props:
-                # Some properties objects don’t have "online"
-                if "online" in p and p["online"] is False:
-                    dev.online = False
+                if "online" in p or "deviceOnline" in p or "isOnline" in p:
+                    try:
+                        val = p.get("online")
+                        if val is None:
+                            val = p.get("deviceOnline")
+                        if val is None:
+                            val = p.get("isOnline")
+                        if isinstance(val, bool):
+                            online_flag = val
+                        elif isinstance(val, str):
+                            online_flag = val.lower() == "true"
+                        else:
+                            online_flag = bool(val)
+                    except Exception:
+                        pass
                 if p.get("powerState") == "on":
                     dev.power_state = True
                 if p.get("powerState") == "off":
@@ -1137,7 +1144,23 @@ class GoveeClient:
                 else:
                     dev.color_temp = int(new_ct)
                     dev.color = (0, 0, 0)
-            dev.online = True
+            if online_flag is not None:
+                dev.online = online_flag
+            elif not props:
+                dev.online = False
+
+            try:
+                dev.timestamp = int(time.time())
+            except Exception:
+                pass
+            try:
+                if self._hass and self._config_entry:
+                    entry_data = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id)
+                    iot_client = entry_data.get("iot_client") if entry_data else None
+                    if iot_client and hasattr(iot_client, "mark_seen"):
+                        iot_client.mark_seen(device_id, online=online_flag if online_flag is not None else None)
+            except Exception:
+                pass
 
             return True, None
 
@@ -1157,3 +1180,4 @@ class GoveeClient:
                 return
 
         asyncio.create_task(runner())
+
