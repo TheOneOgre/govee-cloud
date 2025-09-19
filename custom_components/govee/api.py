@@ -851,6 +851,7 @@ class GoveeClient:
             self._ctrl_locks[device.device] = lock
 
         async with lock:
+            err_iot = None
             _LOGGER.debug("Sending control → %s %s: %s", device.device, command, value)
 
             # Short post-success cooldown (set below). Avoid long sleeps here to
@@ -869,7 +870,7 @@ class GoveeClient:
                     entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id)
                     iot = entry_data and entry_data.get("iot_client")
                     if iot:
-                        ok = await iot.async_publish_control(device.device, command, value)
+                        ok, err_iot = await iot.async_publish_control(device.device, command, value)
                         if ok:
                             # Record pending expectation for UI smoothing
                             now2 = time.monotonic()
@@ -893,11 +894,24 @@ class GoveeClient:
                             # Schedule a reconcile poll via REST less frequently to ensure UI sync
                             self._schedule_post_control_poll(device.device)
                             return True, None
+                        if err_iot and err_iot != "publish_failed":
+                            # Surface IoT specific error and avoid REST fallback unless publish truly failed
+                            if err_iot == "iot_no_confirm":
+                                if device is not None:
+                                    device.online = False
+                                return False, "Device did not respond to IoT command"
+                            if err_iot in {"iot_not_ready", "no_topic", "throttled"}:
+                                return False, "IoT control temporarily unavailable"
+                            if err_iot == "unsupported_command":
+                                return False, "IoT command unsupported"
+                            # Otherwise proceed to REST fallback if available
             except Exception as ex:
                 _LOGGER.debug("IoT control path error: %s", ex)
 
             # If no API key configured, avoid REST fallback to prevent 401s
             if not self._api_key:
+                if err_iot == "publish_failed":
+                    return False, "IoT publish failed"
                 return False, "IoT control unavailable and no API key configured"
 
             await self._rate_limit_delay()
@@ -1180,4 +1194,3 @@ class GoveeClient:
                 return
 
         asyncio.create_task(runner())
-

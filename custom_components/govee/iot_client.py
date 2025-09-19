@@ -161,9 +161,14 @@ class GoveeIoTClient:
         # Passive MQTT discovery cache (device_id -> last state payload)
         self._seen_devices: dict[str, dict] = {}
         self._last_seen_wall: dict[str, float] = {}
-        self._offline_task: asyncio.Task | None = None
-        self._offline_timeout: float = 4 * 60.0  # seconds before marking device offline
-        self._offline_check_interval: float = 60.0
+        self._pending_status: dict[str, float] = {}
+        self._status_grace: float = 5.0
+        self._miss_counts: dict[str, int] = {}
+        self._status_miss_threshold: int = 2
+        self._ping_interval: float = 5 * 60.0
+        self._ping_task: asyncio.Task | None = None
+        self._status_timers: dict[str, asyncio.Task] = {}
+        self._alt_status_models: set[str] = {"H6121"}
 
         # Global publish token bucket (max publishes per minute across all devices)
         # Default: 20/min
@@ -254,6 +259,7 @@ class GoveeIoTClient:
                 if ok:
                     online = getattr(dev, "online", None) if dev else None
                     self.mark_seen(device_id, online=online)
+                    self._clear_pending_status(device_id)
                 else:
                     # REST fallback failed; treat as offline until IoT reports back.
                     self.mark_seen(device_id, online=False)
@@ -266,6 +272,7 @@ class GoveeIoTClient:
                     if ok:
                         online = getattr(dev, "online", None) if dev else None
                         self.mark_seen(dev_id, online=online)
+                        self._clear_pending_status(dev_id)
                     else:
                         # REST fallback failed; treat as offline until IoT reports back.
                         self.mark_seen(dev_id, online=False)
@@ -533,16 +540,6 @@ class GoveeIoTClient:
             )
         except Exception:
             pass
-        if not self._offline_task:
-            try:
-                creator = getattr(self._hass, "async_create_background_task", None)
-                if creator:
-                    # Ensure watchdog does not block Home Assistant bootstrap
-                    self._offline_task = creator(self._offline_watchdog(), name="govee_offline_watchdog")
-                else:
-                    self._offline_task = self._hass.async_create_task(self._offline_watchdog())
-            except Exception:
-                self._offline_task = None
         try:
             # Seed state promptly so entities don't rely solely on MQTT pushes
             self._hass.loop.call_soon_threadsafe(self._hass.async_create_task, self._poll_state_fallback())
@@ -562,6 +559,8 @@ class GoveeIoTClient:
 
         client.on_disconnect = on_disconnect
 
+        self._ensure_ping_loop()
+
 
     def _schedule_state_update(self, device_id: str, state: Dict[str, Any]):
         async def _apply():
@@ -574,6 +573,7 @@ class GoveeIoTClient:
                 self._last_seen_wall[device_id] = now_wall
             except Exception:
                 pass
+            self._clear_pending_status(device_id)
             try:
                 dev.timestamp = int(now_wall)
             except Exception:
@@ -693,61 +693,96 @@ class GoveeIoTClient:
             # Fallback in case loop call fails (shouldn't on HA)
             asyncio.run_coroutine_threadsafe(_apply(), self._hass.loop)
 
-    async def _offline_watchdog(self):
+    def _ensure_ping_loop(self) -> None:
+        if self._ping_task and not self._ping_task.done():
+            return
         try:
+            creator = getattr(self._hass, "async_create_background_task", None)
+            if creator:
+                self._ping_task = creator(self._status_ping_loop(), name="govee_status_ping")
+            else:
+                self._ping_task = self._hass.async_create_task(self._status_ping_loop())
+        except Exception:
+            loop = asyncio.get_running_loop()
+            self._ping_task = loop.create_task(self._status_ping_loop())
+
+    async def _status_ping_loop(self):
+        try:
+            await asyncio.sleep(10.0)
             while True:
-                await asyncio.sleep(self._offline_check_interval)
-                if not self._hub or not getattr(self._hub, '_devices', None):
-                    continue
-                entry_data = self._hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
-                coord = entry_data.get('coordinator') if entry_data else None
-                now_wall = time.time()
-                stale_ids: list[str] = []
-                for dev_id, dev in list(self._hub._devices.items()):
-                    if not getattr(dev, 'online', False):
-                        continue
-                    last_seen = self._last_seen_wall.get(dev_id)
-                    if last_seen is None:
-                        stale_ids.append(dev_id)
-                        continue
-                    try:
-                        age = now_wall - float(last_seen)
-                    except Exception:
-                        age = 0.0
-                    if age > self._offline_timeout:
-                        stale_ids.append(dev_id)
-
-                if not stale_ids:
-                    continue
-
-                for dev_id in stale_ids:
-                    try:
-                        await self._poll_state_fallback(dev_id)
-                    except Exception:
-                        pass
-
-                changed = False
-                now_wall_post = time.time()
-                for dev_id in stale_ids:
-                    dev = self._hub._devices.get(dev_id)
-                    if not dev:
-                        continue
-                    last_seen = self._last_seen_wall.get(dev_id)
-                    try:
-                        age = now_wall_post - float(last_seen) if last_seen is not None else self._offline_timeout + 1
-                    except Exception:
-                        age = self._offline_timeout + 1
-                    if getattr(dev, 'online', False) and age > self._offline_timeout:
-                        dev.online = False
-                        changed = True
-
-                if changed and coord:
-                    try:
-                        coord.async_set_updated_data(list(self._hub._devices.values()))
-                    except Exception:
-                        pass
+                try:
+                    targets = list(self._device_topics.keys())
+                except Exception:
+                    targets = []
+                if targets:
+                    devices_map = getattr(self._hub, "_devices", {}) if self._hub else {}
+                    now_wall = time.time()
+                    for dev_id in targets:
+                        if dev_id in self._pending_status:
+                            continue
+                        miss_count = self._miss_counts.get(dev_id, 0)
+                        dev_obj = devices_map.get(dev_id) if isinstance(devices_map, dict) else None
+                        is_online = bool(getattr(dev_obj, "online", False)) if dev_obj else False
+                        last_seen = self._last_seen_wall.get(dev_id)
+                        stale = False
+                        try:
+                            if last_seen is None:
+                                stale = True
+                            else:
+                                stale = (now_wall - float(last_seen)) >= self._ping_interval
+                        except Exception:
+                            stale = True
+                        should_request = (
+                            miss_count > 0
+                            or not is_online
+                            or stale
+                        )
+                        if not should_request:
+                            continue
+                        try:
+                            await self.async_request_status(dev_id)
+                        except Exception as ex:
+                            _LOGGER.debug("Periodic status request failed for %s: %s", dev_id, ex)
+                        await asyncio.sleep(0.1)
+                await asyncio.sleep(self._ping_interval)
         except asyncio.CancelledError:
             return
+
+    async def _status_timeout(self, device_id: str):
+        try:
+            await asyncio.sleep(self._status_grace)
+        except asyncio.CancelledError:
+            return
+        if device_id not in self._pending_status:
+            return
+        self._pending_status.pop(device_id, None)
+        self._status_timers.pop(device_id, None)
+        misses = self._miss_counts.get(device_id, 0) + 1
+        self._miss_counts[device_id] = misses
+        if misses >= self._status_miss_threshold:
+            self._mark_device_offline(device_id)
+            return
+        try_alt = self._should_try_alt_status(device_id, misses)
+        self._hass.async_create_task(self.async_request_status(device_id, use_alt=try_alt))
+
+    def _should_try_alt_status(self, device_id: str, misses: int) -> bool:
+        if not self._alt_status_models or misses <= 0:
+            return False
+        dev = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
+        model = (getattr(dev, "model", "") or "").upper()
+        return model in self._alt_status_models and misses >= 1
+
+    def _build_status_payload(self, device_id: str, *, use_alt: bool = False) -> dict[str, Any]:
+        msg = {
+            "cmd": "status",
+            "cmdVersion": 1 if use_alt else 2,
+            "transaction": f"v_{_ms_ts()}000",
+            "type": 0,
+        }
+        if self._account_topic:
+            msg["accountTopic"] = self._account_topic
+        return {"msg": msg}
+
     async def stop(self):
         if self._iot and self._iot.mqtt:
             try:
@@ -763,15 +798,32 @@ class GoveeIoTClient:
                     except Exception:
                         pass
 
-        if self._offline_task:
-            task = self._offline_task
-            self._offline_task = None
+        if self._ping_task:
+            task = self._ping_task
+            self._ping_task = None
             try:
                 task.cancel()
             except Exception:
                 pass
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+        for dev_id, timer in list(self._status_timers.items()):
+            try:
+                if timer and not timer.done():
+                    timer.cancel()
+            except Exception:
+                pass
+        self._status_timers.clear()
+
+        try:
+            self._pending_status.clear()
+        except Exception:
+            pass
+        try:
+            self._miss_counts.clear()
+        except Exception:
+            pass
 
         self._loop = None
 
@@ -851,6 +903,7 @@ class GoveeIoTClient:
             __import__('json').dump(mapping, open(path, 'w', encoding='utf-8'))
         except Exception:
             pass
+        self._ensure_ping_loop()
 
     @property
     def can_control(self) -> bool:
@@ -880,6 +933,43 @@ class GoveeIoTClient:
         except Exception:
             pass
 
+    def _cancel_status_timer(self, device_id: str) -> None:
+        task = self._status_timers.pop(device_id, None)
+        if task and not task.done():
+            task.cancel()
+
+    def _clear_pending_status(self, device_id: str, *, reset_miss: bool = True) -> None:
+        self._cancel_status_timer(device_id)
+        try:
+            self._pending_status.pop(device_id, None)
+        except Exception:
+            pass
+        if reset_miss:
+            self._miss_counts[device_id] = 0
+
+    def _mark_device_offline(self, device_id: str) -> bool:
+        dev_local = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
+        updated = False
+        if dev_local is not None and getattr(dev_local, "online", True):
+            dev_local.online = False
+            updated = True
+        try:
+            self._last_seen_wall.pop(device_id, None)
+        except Exception:
+            pass
+        self._clear_pending_status(device_id, reset_miss=False)
+        if not updated:
+            return False
+        self._miss_counts[device_id] = self._status_miss_threshold
+        try:
+            entry_bucket = self._hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+            coord = entry_bucket.get("coordinator") if entry_bucket else None
+            if coord and self._hub:
+                coord.async_set_updated_data(list(self._hub._devices.values()))
+        except Exception:
+            pass
+        return True
+
     async def async_broadcast_status_request(self) -> bool:
         """Seed state using REST fallback when a broadcast is requested."""
 
@@ -892,7 +982,7 @@ class GoveeIoTClient:
         return False
 
 
-    async def async_publish_control(self, device_id: str, command: str, value: Any) -> bool:
+    async def async_publish_control(self, device_id: str, command: str, value: Any) -> tuple[bool, str | None]:
         if not self.can_control:
             # Be explicit about what's missing
             if not self._iot:
@@ -903,7 +993,7 @@ class GoveeIoTClient:
                 _LOGGER.debug("IoT publish blocked: MQTT credentials are read-only")
             else:
                 _LOGGER.debug("IoT publish blocked: MQTT not ready")
-            return False
+            return False, "iot_not_ready"
         topic = self._device_topics.get(device_id)
         if not topic:
             # Try reading from cached devices.json only; do not hit mobile API
@@ -925,7 +1015,7 @@ class GoveeIoTClient:
                 _LOGGER.debug("IoT cached topic load failed: %s", ex)
             if not topic:
                 _LOGGER.debug("IoT publish blocked: No topic for %s", device_id)
-                return False
+                return False, "no_topic"
         # Enforce global publish rate limit (20/min default)
         wait = self._pub_bucket_take(1.0)
         if wait > 0:
@@ -942,7 +1032,7 @@ class GoveeIoTClient:
             try:
                 await asyncio.sleep(wait)
             except asyncio.CancelledError:
-                return False
+                return False, "throttled"
 
         # Build app-like envelope
         msg: dict[str, Any] = {
@@ -954,16 +1044,137 @@ class GoveeIoTClient:
         }
         if self._account_topic:
             msg["accountTopic"] = self._account_topic
+
+        def _current_onoff() -> int | None:
+            state = self._seen_devices.get(device_id, {})
+            val = state.get("onOff")
+            if val is None:
+                val = state.get("powerState")
+            if isinstance(val, str):
+                normalized = val.strip().lower()
+                if normalized in ("on", "true", "1"):
+                    return 1
+                if normalized in ("off", "false", "0"):
+                    return 0
+                try:
+                    return 1 if int(normalized) else 0
+                except Exception:
+                    return None
+            if isinstance(val, (int, float)):
+                try:
+                    return 1 if int(val) else 0
+                except Exception:
+                    return None
+            return None
+
+        async def _confirm_power(expected: int, timeout: float = 5.0) -> bool:
+            import time as _t
+            deadline = _t.monotonic() + max(0.2, float(timeout))
+            while _t.monotonic() < deadline:
+                current = _current_onoff()
+                if current is not None and current == expected:
+                    return True
+                try:
+                    await asyncio.sleep(0.2)
+                except asyncio.CancelledError:
+                    return False
+            return False
+
+        def _current_brightness() -> int | None:
+            state = self._seen_devices.get(device_id, {})
+            val = state.get("brightness")
+            if val is None:
+                val = state.get("bright")
+            if isinstance(val, str):
+                try:
+                    return int(float(val))
+                except Exception:
+                    return None
+            if isinstance(val, (int, float)):
+                try:
+                    return int(val)
+                except Exception:
+                    return None
+            return None
+
+        async def _confirm_brightness(expected: int, timeout: float = 5.0) -> bool:
+            import time as _t
+            deadline = _t.monotonic() + max(0.2, float(timeout))
+            while _t.monotonic() < deadline:
+                current = _current_brightness()
+                if current is not None and int(current) == int(expected):
+                    return True
+                try:
+                    await asyncio.sleep(0.2)
+                except asyncio.CancelledError:
+                    return False
+            return False
+
         if command == "turn":
+            target = 1 if str(value).lower() == "on" else 0
             msg["cmd"] = "turn"
-            msg["data"] = {"val": 1 if str(value).lower() == "on" else 0}
+            msg["data"] = {"val": target}
             payload = {"msg": msg}
-            return bool(self._publish(topic, payload))
+            if not self._publish(topic, payload):
+                return False, "publish_failed"
+            if await _confirm_power(target):
+                return True, None
+            try:
+                _LOGGER.debug("IoT turn confirm failed for %s target=%s; falling back", device_id, target)
+            except Exception:
+                pass
+            has_api = bool(getattr(self._hub, "_api_key", None))
+            fallback_ok: bool | None = None
+            if has_api:
+                try:
+                    fallback_ok = await self._poll_state_fallback(device_id)
+                except Exception as ex:
+                    _LOGGER.debug("IoT turn fallback poll failed for %s: %s", device_id, ex)
+                    fallback_ok = False
+            dev_local = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
+            if (
+                fallback_ok is False
+                or (fallback_ok and dev_local and getattr(dev_local, "online", True) is False)
+                or (fallback_ok is None and not has_api)
+            ):
+                self._mark_device_offline(device_id)
+            return False, "iot_no_confirm"
         if command == "brightness":
+            try:
+                target = int(value)
+            except Exception:
+                try:
+                    target = int(float(value))
+                except Exception:
+                    target = 0
+            target = max(0, min(100, target))
             msg["cmd"] = "brightness"
-            msg["data"] = {"val": int(value)}
+            msg["data"] = {"val": target}
             payload = {"msg": msg}
-            return bool(self._publish(topic, payload))
+            if not self._publish(topic, payload):
+                return False, "publish_failed"
+            if await _confirm_brightness(target):
+                return True, None
+            try:
+                _LOGGER.debug("IoT brightness confirm failed for %s → %s; falling back", device_id, target)
+            except Exception:
+                pass
+            has_api = bool(getattr(self._hub, "_api_key", None))
+            fallback_ok: bool | None = None
+            if has_api:
+                try:
+                    fallback_ok = await self._poll_state_fallback(device_id)
+                except Exception as ex:
+                    _LOGGER.debug("IoT brightness fallback poll failed for %s: %s", device_id, ex)
+                    fallback_ok = False
+            dev_local = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
+            if (
+                fallback_ok is False
+                or (fallback_ok and dev_local and getattr(dev_local, "online", True) is False)
+                or (fallback_ok is None and not has_api)
+            ):
+                self._mark_device_offline(device_id)
+            return False, "iot_no_confirm"
         if command == "color":
             r = int(value.get("r", 0))
             g = int(value.get("g", 0))
@@ -973,11 +1184,11 @@ class GoveeIoTClient:
 
             # Drop exact duplicate within 1s to avoid churn while dragging the color wheel
             try:
-                now_mono = __import__('time').monotonic()
+                now_mono = time.monotonic()
                 last = self._last_color_sent.get(device_id)
                 if last and last[0] == (r, g, b) and (now_mono - last[1]) < 1.0:
                     _LOGGER.debug("IoT suppress duplicate color publish for %s rgb=%s", device_id, (r, g, b))
-                    return True
+                    return True, None
             except Exception:
                 pass
 
@@ -1007,19 +1218,16 @@ class GoveeIoTClient:
                     )
                 except Exception:
                     pass
-                # Poll quickly for confirmation; break early when matched
                 while _t.monotonic() < deadline:
-                    # Abort if a newer pending color supersedes this target
                     try:
                         if dev is not None and dev.pending_color is not None and tuple(dev.pending_color) != (r, g, b):
-                            _LOGGER.debug("IoT confirm aborted (superseded) for %s old=%s new=%s", device_id, (r,g,b), dev.pending_color)
+                            _LOGGER.debug("IoT confirm aborted (superseded) for %s old=%s new=%s", device_id, (r, g, b), dev.pending_color)
                             return False
                     except Exception:
                         pass
                     rgb_state = _last_rgb()
                     if rgb_state == (r, g, b):
                         if dev is not None:
-                            # Memory-only: set in-device flag but do not persist to disk
                             dev.color_cmd_use_colorwc = using_wc
                         try:
                             _LOGGER.debug(
@@ -1051,23 +1259,18 @@ class GoveeIoTClient:
                     pass
                 return False
 
-            # Choose preferred based on learned flag (default to colorwc)
             prefer_wc = (use_wc is not False)
-            # First attempt
+            confirmed = False
             if prefer_wc:
                 import time as _t
                 wc_deadline = _t.monotonic() + 5.0
                 msg["cmd"] = "colorwc"
-                # Include colorTemInKelvin=0 in color mode
                 msg["data"] = {"color": {"r": r, "g": g, "b": b}, "colorTemInKelvin": 0}
                 payload = {"msg": msg}
                 if not self._publish(topic, payload):
-                    return False
-                if dev is not None:
-                    if await _confirm_and_persist(True, 5.0):
-                        return True
-                    # Fallback attempt to legacy color
-                    # Hard guard: never fallback before full 5s window elapses
+                    return False, "publish_failed"
+                confirmed = await _confirm_and_persist(True, 5.0)
+                if not confirmed and dev is not None:
                     try:
                         nowm = _t.monotonic()
                         if nowm < wc_deadline:
@@ -1076,22 +1279,13 @@ class GoveeIoTClient:
                                 device_id,
                                 (r, g, b),
                             )
-                            return True
+                            return True, None
                     except Exception:
                         pass
-                    # Only fallback if still aiming for the same pending color
                     try:
                         if dev.pending_color is not None and tuple(dev.pending_color) != (r, g, b):
-                            _LOGGER.debug("IoT skip fallback legacy color; superseded %s -> %s", (r,g,b), dev.pending_color)
-                            return True
-                    except Exception:
-                        pass
-                    try:
-                        _LOGGER.debug(
-                            "IoT fallback: trying legacy color after unconfirmed colorwc for %s rgb=%s",
-                            device_id,
-                            (r, g, b),
-                        )
+                            _LOGGER.debug("IoT skip fallback legacy color; superseded %s -> %s", (r, g, b), dev.pending_color)
+                            return True, None
                     except Exception:
                         pass
                     msg2 = {
@@ -1104,23 +1298,20 @@ class GoveeIoTClient:
                     if self._account_topic:
                         msg2["accountTopic"] = self._account_topic
                     payload2 = {"msg": msg2}
-                    self._publish(topic, payload2)
-                    await _confirm_and_persist(False, 5.0)
-                return True
+                    if self._publish(topic, payload2):
+                        confirmed = await _confirm_and_persist(False, 5.0)
+                    else:
+                        return False, "publish_failed"
             else:
-                # Prefer legacy color but confirm and switch back if wrong
                 import time as _t
                 legacy_deadline = _t.monotonic() + 5.0
                 msg["cmd"] = "color"
                 msg["data"] = {"r": r, "g": g, "b": b}
                 payload = {"msg": msg}
                 if not self._publish(topic, payload):
-                    return False
-                if dev is not None:
-                    if await _confirm_and_persist(False, 5.0):
-                        return True
-                    # Try colorwc if legacy didn't reflect correctly
-                    # Hard guard: never fallback before full 5s window elapses
+                    return False, "publish_failed"
+                confirmed = await _confirm_and_persist(False, 5.0)
+                if not confirmed and dev is not None:
                     try:
                         nowm = _t.monotonic()
                         if nowm < legacy_deadline:
@@ -1129,27 +1320,17 @@ class GoveeIoTClient:
                                 device_id,
                                 (r, g, b),
                             )
-                            return True
+                            return True, None
                     except Exception:
                         pass
-                    # Only fallback if still aiming for the same pending color
                     try:
                         if dev.pending_color is not None and tuple(dev.pending_color) != (r, g, b):
-                            _LOGGER.debug("IoT skip fallback colorwc; superseded %s -> %s", (r,g,b), dev.pending_color)
-                            return True
-                    except Exception:
-                        pass
-                    try:
-                        _LOGGER.debug(
-                            "IoT fallback: trying colorwc after unconfirmed legacy color for %s rgb=%s",
-                            device_id,
-                            (r, g, b),
-                        )
+                            _LOGGER.debug("IoT skip fallback colorwc; superseded %s -> %s", (r, g, b), dev.pending_color)
+                            return True, None
                     except Exception:
                         pass
                     msg2 = {
                         "cmd": "colorwc",
-                        # Include colorTemInKelvin=0 in color mode
                         "data": {"color": {"r": r, "g": g, "b": b}, "colorTemInKelvin": 0},
                         "cmdVersion": 1,
                         "transaction": f"v_{_ms_ts()}000",
@@ -1158,9 +1339,32 @@ class GoveeIoTClient:
                     if self._account_topic:
                         msg2["accountTopic"] = self._account_topic
                     payload2 = {"msg": msg2}
-                    self._publish(topic, payload2)
-                    await _confirm_and_persist(True, 5.0)
-                return True
+                    if self._publish(topic, payload2):
+                        confirmed = await _confirm_and_persist(True, 5.0)
+                    else:
+                        return False, "publish_failed"
+            if confirmed:
+                return True, None
+            try:
+                _LOGGER.debug("IoT color confirm failed for %s rgb=%s; scheduling REST fallback", device_id, (r, g, b))
+            except Exception:
+                pass
+            has_api = bool(getattr(self._hub, "_api_key", None))
+            fallback_ok: bool | None = None
+            if has_api:
+                try:
+                    fallback_ok = await self._poll_state_fallback(device_id)
+                except Exception as ex:
+                    _LOGGER.debug("IoT color fallback poll failed for %s: %s", device_id, ex)
+                    fallback_ok = False
+            dev_local = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
+            if (
+                fallback_ok is False
+                or (fallback_ok and dev_local and getattr(dev_local, "online", True) is False)
+                or (fallback_ok is None and not has_api)
+            ):
+                self._mark_device_offline(device_id)
+            return False, "iot_no_confirm"
         if command == "colorTem":
             dev = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
             send_percent = getattr(dev, "color_temp_send_percent", None)
@@ -1170,7 +1374,6 @@ class GoveeIoTClient:
                 import time as _t
                 deadline = _t.monotonic() + max(0.2, float(timeout))
                 while _t.monotonic() < deadline:
-                    # Abort if a newer pending CT supersedes this target
                     try:
                         if dev is not None and dev.pending_ct is not None and int(dev.pending_ct) != int(kelvin):
                             _LOGGER.debug("IoT confirm CT aborted (superseded) for %s old=%s new=%s", device_id, kelvin, dev.pending_ct)
@@ -1180,7 +1383,6 @@ class GoveeIoTClient:
                     v = self._seen_devices.get(device_id, {}).get("colorTemInKelvin")
                     if isinstance(v, (int, float)) and int(v) == kelvin:
                         if dev is not None:
-                            # Memory-only: set in-device flag but do not persist to disk
                             dev.color_temp_send_percent = using_percent
                         try:
                             self._last_ct_sent[device_id] = (int(kelvin), _t.monotonic())
@@ -1194,21 +1396,19 @@ class GoveeIoTClient:
                 return False
 
             prefer_kelvin_via_wc = (send_percent is not True)
+            confirmed = False
             if prefer_kelvin_via_wc:
                 msg["cmd"] = "colorwc"
-                # Send only the color temperature field; omit the color field
                 msg["data"] = {"colorTemInKelvin": kelvin}
                 payload = {"msg": msg}
                 if not self._publish(topic, payload):
-                    return False
-                if dev is not None:
-                    if await _confirm_kelvin_and_persist(False, 5.0):
-                        return True
-                    # Try percent
+                    return False, "publish_failed"
+                confirmed = await _confirm_kelvin_and_persist(False, 5.0)
+                if not confirmed and dev is not None:
                     try:
                         if dev.pending_ct is not None and int(dev.pending_ct) != int(kelvin):
                             _LOGGER.debug("IoT skip percent fallback; CT superseded %s -> %s", kelvin, dev.pending_ct)
-                            return True
+                            return True, None
                     except Exception:
                         pass
                     vmin = dev.color_temp_min or 2700
@@ -1226,29 +1426,26 @@ class GoveeIoTClient:
                     if self._account_topic:
                         msg2["accountTopic"] = self._account_topic
                     payload2 = {"msg": msg2}
-                    self._publish(topic, payload2)
-                    await _confirm_kelvin_and_persist(True, 5.0)
-                return True
+                    if self._publish(topic, payload2):
+                        confirmed = await _confirm_kelvin_and_persist(True, 5.0)
+                    else:
+                        return False, "publish_failed"
             else:
-                # Prefer percent first, but correct if wrong
                 msg["cmd"] = "colorTem"
                 msg["data"] = {"colorTem": kelvin}
                 payload = {"msg": msg}
                 if not self._publish(topic, payload):
-                    return False
-                if dev is not None:
-                    if await _confirm_kelvin_and_persist(True, 5.0):
-                        return True
-                    # Try Kelvin via colorwc if percent didn't reflect correctly
+                    return False, "publish_failed"
+                confirmed = await _confirm_kelvin_and_persist(True, 5.0)
+                if not confirmed and dev is not None:
                     try:
                         if dev.pending_ct is not None and int(dev.pending_ct) != int(kelvin):
                             _LOGGER.debug("IoT skip Kelvin fallback; CT superseded %s -> %s", kelvin, dev.pending_ct)
-                            return True
+                            return True, None
                     except Exception:
                         pass
                     msg2 = {
                         "cmd": "colorwc",
-                        # Send only the color temperature field; omit the color field
                         "data": {"colorTemInKelvin": kelvin},
                         "cmdVersion": 1,
                         "transaction": f"v_{_ms_ts()}000",
@@ -1257,52 +1454,74 @@ class GoveeIoTClient:
                     if self._account_topic:
                         msg2["accountTopic"] = self._account_topic
                     payload2 = {"msg": msg2}
-                    self._publish(topic, payload2)
-                    await _confirm_kelvin_and_persist(False, 5.0)
-                return True
-        return False
+                    if self._publish(topic, payload2):
+                        confirmed = await _confirm_kelvin_and_persist(False, 5.0)
+                    else:
+                        return False, "publish_failed"
+            if confirmed:
+                return True, None
+            try:
+                _LOGGER.debug("IoT color temperature confirm failed for %s → %sK; scheduling REST fallback", device_id, kelvin)
+            except Exception:
+                pass
+            has_api = bool(getattr(self._hub, "_api_key", None))
+            fallback_ok: bool | None = None
+            if has_api:
+                try:
+                    fallback_ok = await self._poll_state_fallback(device_id)
+                except Exception as ex:
+                    _LOGGER.debug("IoT color temperature fallback poll failed for %s: %s", device_id, ex)
+                    fallback_ok = False
+            dev_local = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
+            if (
+                fallback_ok is False
+                or (fallback_ok and dev_local and getattr(dev_local, "online", True) is False)
+                or (fallback_ok is None and not has_api)
+            ):
+                self._mark_device_offline(device_id)
+            return False, "iot_no_confirm"
+        return False, "unsupported_command"
 
-    async def async_request_status(self, device_id: str) -> bool:
+    async def async_request_status(self, device_id: str, *, use_alt: bool | None = None) -> bool:
         """Request device status over MQTT, falling back to REST if needed."""
 
-        mqtt_sent = False
-        if self.can_control:
-            topic = self._device_topics.get(device_id)
-            if topic:
-                wait = self._pub_bucket_take(1.0)
-                if wait > 0:
-                    _LOGGER.debug("IoT publish throttled (device status %s): waiting %.2fs", device_id, wait)
-                    try:
-                        await asyncio.sleep(wait)
-                    except asyncio.CancelledError:
-                        return False
-                msg = {
-                    "cmd": "status",
-                    "cmdVersion": 2,
-                    "transaction": f"v_{_ms_ts()}000",
-                    "type": 0,
-                }
-                payload = {"msg": msg}
-                try:
-                    if self._publish(topic, payload, log_payload=False):
-                        mqtt_sent = True
-                except Exception as ex:
-                    _LOGGER.debug("IoT status publish failed: %s", ex)
-        if mqtt_sent:
-            return True
+        self._ensure_ping_loop()
+        if not self.can_control:
+            return await self._poll_state_fallback(device_id)
+        topic = self._device_topics.get(device_id)
+        if not topic:
+            _LOGGER.debug("IoT status request skipped: no topic for %s", device_id)
+            return await self._poll_state_fallback(device_id)
+        wait = self._pub_bucket_take(1.0)
+        if wait > 0:
+            _LOGGER.debug("IoT publish throttled (status %s): waiting %.2fs", device_id, wait)
+            try:
+                await asyncio.sleep(wait)
+            except asyncio.CancelledError:
+                return False
+
+        misses_before = self._miss_counts.get(device_id, 0)
+        alt_flag = bool(use_alt) if use_alt is not None else self._should_try_alt_status(device_id, misses_before)
+        payload = self._build_status_payload(device_id, use_alt=alt_flag)
+        if alt_flag:
+            _LOGGER.debug("IoT status request (alt) → %s", device_id)
         try:
-            if await self._poll_state_fallback(device_id):
-                _LOGGER.debug("IoT request status satisfied via REST fallback for %s", device_id)
-                return True
+            if not self._publish(topic, payload, log_payload=False):
+                raise RuntimeError("publish returned rc!=0")
         except Exception as ex:
-            _LOGGER.debug("IoT request status fallback failed for %s: %s", device_id, ex)
-        return False
+            _LOGGER.debug("IoT status publish failed: %s", ex)
+            return await self._poll_state_fallback(device_id)
 
-
-
-
-
-
-
-
-
+        self._clear_pending_status(device_id, reset_miss=False)
+        self._pending_status[device_id] = time.monotonic() + self._status_grace
+        self._miss_counts.setdefault(device_id, 0)
+        try:
+            creator = getattr(self._hass, "async_create_background_task", None)
+            if creator:
+                self._status_timers[device_id] = creator(self._status_timeout(device_id), name=f"govee_status_timeout_{device_id}")
+            else:
+                self._status_timers[device_id] = self._hass.async_create_task(self._status_timeout(device_id))
+        except Exception:
+            loop = asyncio.get_running_loop()
+            self._status_timers[device_id] = loop.create_task(self._status_timeout(device_id))
+        return True
