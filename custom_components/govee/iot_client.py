@@ -598,6 +598,11 @@ class GoveeIoTClient:
                     dev.online = online_flag.lower() == "true"
                 else:
                     dev.online = bool(online_flag)
+            else:
+                try:
+                    dev.online = True
+                except Exception:
+                    pass
             # onOff
             if "onOff" in state:
                 try:
@@ -1126,6 +1131,7 @@ class GoveeIoTClient:
             except Exception:
                 pass
             has_api = bool(getattr(self._hub, "_api_key", None))
+            last_seen_before_fallback = self._last_seen_wall.get(device_id)
             fallback_ok: bool | None = None
             if has_api:
                 try:
@@ -1134,7 +1140,18 @@ class GoveeIoTClient:
                     _LOGGER.debug("IoT turn fallback poll failed for %s: %s", device_id, ex)
                     fallback_ok = False
             dev_local = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
-            if (
+            recent_seen = False
+            if last_seen_before_fallback is not None:
+                try:
+                    recent_seen = (time.time() - float(last_seen_before_fallback)) < 60.0
+                except Exception:
+                    pass
+            if recent_seen:
+                try:
+                    _LOGGER.debug("Skipping offline mark for %s; recent IoT activity", device_id)
+                except Exception:
+                    pass
+            elif (
                 fallback_ok is False
                 or (fallback_ok and dev_local and getattr(dev_local, "online", True) is False)
                 or (fallback_ok is None and not has_api)
@@ -1162,6 +1179,7 @@ class GoveeIoTClient:
             except Exception:
                 pass
             has_api = bool(getattr(self._hub, "_api_key", None))
+            last_seen_before_fallback = self._last_seen_wall.get(device_id)
             fallback_ok: bool | None = None
             if has_api:
                 try:
@@ -1170,7 +1188,18 @@ class GoveeIoTClient:
                     _LOGGER.debug("IoT brightness fallback poll failed for %s: %s", device_id, ex)
                     fallback_ok = False
             dev_local = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
-            if (
+            recent_seen = False
+            if last_seen_before_fallback is not None:
+                try:
+                    recent_seen = (time.time() - float(last_seen_before_fallback)) < 60.0
+                except Exception:
+                    pass
+            if recent_seen:
+                try:
+                    _LOGGER.debug("Skipping offline mark for %s; recent IoT activity", device_id)
+                except Exception:
+                    pass
+            elif (
                 fallback_ok is False
                 or (fallback_ok and dev_local and getattr(dev_local, "online", True) is False)
                 or (fallback_ok is None and not has_api)
@@ -1352,6 +1381,7 @@ class GoveeIoTClient:
             except Exception:
                 pass
             has_api = bool(getattr(self._hub, "_api_key", None))
+            last_seen_before_fallback = self._last_seen_wall.get(device_id)
             fallback_ok: bool | None = None
             if has_api:
                 try:
@@ -1360,7 +1390,18 @@ class GoveeIoTClient:
                     _LOGGER.debug("IoT color fallback poll failed for %s: %s", device_id, ex)
                     fallback_ok = False
             dev_local = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
-            if (
+            recent_seen = False
+            if last_seen_before_fallback is not None:
+                try:
+                    recent_seen = (time.time() - float(last_seen_before_fallback)) < 60.0
+                except Exception:
+                    pass
+            if recent_seen:
+                try:
+                    _LOGGER.debug("Skipping offline mark for %s; recent IoT activity", device_id)
+                except Exception:
+                    pass
+            elif (
                 fallback_ok is False
                 or (fallback_ok and dev_local and getattr(dev_local, "online", True) is False)
                 or (fallback_ok is None and not has_api)
@@ -1433,8 +1474,19 @@ class GoveeIoTClient:
                     else:
                         return False, "publish_failed"
             else:
+                vmin = 2700
+                vmax = 9000
+                if dev is not None:
+                    try:
+                        vmin = int(getattr(dev, "color_temp_min", None) or vmin)
+                        vmax = int(getattr(dev, "color_temp_max", None) or vmax)
+                    except Exception:
+                        pass
+                rng = max(1, vmax - vmin)
+                percent = int(round((kelvin - vmin) / rng * 100))
+                percent = max(0, min(100, percent))
                 msg["cmd"] = "colorTem"
-                msg["data"] = {"colorTem": kelvin}
+                msg["data"] = {"colorTem": percent}
                 payload = {"msg": msg}
                 if not self._publish(topic, payload):
                     return False, "publish_failed"
@@ -1467,6 +1519,7 @@ class GoveeIoTClient:
             except Exception:
                 pass
             has_api = bool(getattr(self._hub, "_api_key", None))
+            last_seen_before_fallback = self._last_seen_wall.get(device_id)
             fallback_ok: bool | None = None
             if has_api:
                 try:
@@ -1475,7 +1528,18 @@ class GoveeIoTClient:
                     _LOGGER.debug("IoT color temperature fallback poll failed for %s: %s", device_id, ex)
                     fallback_ok = False
             dev_local = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
-            if (
+            recent_seen = False
+            if last_seen_before_fallback is not None:
+                try:
+                    recent_seen = (time.time() - float(last_seen_before_fallback)) < 60.0
+                except Exception:
+                    pass
+            if recent_seen:
+                try:
+                    _LOGGER.debug("Skipping offline mark for %s; recent IoT activity", device_id)
+                except Exception:
+                    pass
+            elif (
                 fallback_ok is False
                 or (fallback_ok and dev_local and getattr(dev_local, "online", True) is False)
                 or (fallback_ok is None and not has_api)
