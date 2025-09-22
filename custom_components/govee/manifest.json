@@ -18,6 +18,6 @@
     "certifi>=2023.7.22"
   ],
   "ssdp": [],
-  "version": "0.3.3-TheBigFix",
+  "version": "0.3.3-2-TheBigFix",
   "zeroconf": []
 }
