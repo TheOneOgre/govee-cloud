@@ -1408,10 +1408,14 @@ class GoveeIoTClient:
             ):
                 self._mark_device_offline(device_id)
             return False, "iot_no_confirm"
-        if command == "colorTem":
+        command_l = command.lower()
+        if command_l in {"colortem", "colortemperature", "colortemperaturek", "colorteminkelvin"}:
             dev = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
             send_percent = getattr(dev, "color_temp_send_percent", None)
             kelvin = int(value)
+
+            # Non-legacy command names imply Kelvin payloads; prefer colorwc path.
+            force_kelvin = command_l != "colortem"
 
             async def _confirm_kelvin_and_persist(using_percent: bool, timeout: float = 5.0) -> bool:
                 import time as _t
@@ -1438,7 +1442,7 @@ class GoveeIoTClient:
                         return True
                 return False
 
-            prefer_kelvin_via_wc = (send_percent is not True)
+            prefer_kelvin_via_wc = force_kelvin or (send_percent is not True)
             confirmed = False
             if prefer_kelvin_via_wc:
                 msg["cmd"] = "colorwc"

@@ -1,21 +1,34 @@
-"""Simple persistent storage for learned Govee device info.
-
-Stores a mapping of device_id -> GoveeLearnedInfo as JSON under
-Home Assistant's `.storage/` directory.
-"""
+"""Simple persistent storage for learned Govee device info."""
 from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Dict
 
 from .models import GoveeLearnedInfo
+
+LEARNING_SCHEMA_VERSION = 1
 
 
 class GoveeLearningStorage:
     def __init__(self, config_dir: str, hass=None) -> None:
         self._hass = hass
         self._config_dir = config_dir
+        self._integration_version = self._load_manifest_version()
+
+    @staticmethod
+    def _load_manifest_version() -> str | None:
+        try:
+            manifest_path = Path(__file__).with_name("manifest.json")
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            version = manifest.get("version")
+            if isinstance(version, str) and version:
+                return version
+        except Exception:
+            pass
+        return None
 
     def _path(self) -> str:
         # Prefer hass.config.path if hass is provided
@@ -30,16 +43,30 @@ class GoveeLearningStorage:
         def _read() -> Dict[str, GoveeLearnedInfo]:
             path = self._path()
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
+                with open(path, "r", encoding="utf-8") as f_handle:
+                    raw = json.load(f_handle)
             except Exception:
                 return {}
+
+            if not isinstance(raw, dict):
+                return {}
+
+            schema = raw.get("__schema_version")
+            stored_version = raw.get("__integration_version")
+            payload = raw.get("devices") if "devices" in raw else raw
+
+            if schema != LEARNING_SCHEMA_VERSION:
+                return {}
+            if self._integration_version is not None and stored_version != self._integration_version:
+                return {}
+
             out: Dict[str, GoveeLearnedInfo] = {}
-            if isinstance(raw, dict):
-                for k, v in raw.items():
+            if isinstance(payload, dict):
+                for key, value in payload.items():
+                    if not isinstance(value, dict):
+                        continue
                     try:
-                        if isinstance(v, dict):
-                            out[k] = GoveeLearnedInfo(**v)
+                        out[key] = GoveeLearnedInfo(**value)
                     except Exception:
                         # ignore malformed entries
                         pass
@@ -52,10 +79,15 @@ class GoveeLearningStorage:
     async def write(self, infos: Dict[str, GoveeLearnedInfo]) -> None:
         def _write() -> None:
             path = self._path()
+            payload = {
+                "__schema_version": LEARNING_SCHEMA_VERSION,
+                "__integration_version": self._integration_version,
+                "devices": {key: vars(value) for key, value in infos.items()},
+            }
             try:
                 os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump({k: vars(v) for k, v in infos.items()}, f, ensure_ascii=False)
+                with open(path, "w", encoding="utf-8") as f_handle:
+                    json.dump(payload, f_handle, ensure_ascii=False)
             except Exception:
                 # best-effort persistence; ignore failures
                 pass
@@ -64,4 +96,3 @@ class GoveeLearningStorage:
             await self._hass.async_add_executor_job(_write)
         else:
             _write()
-

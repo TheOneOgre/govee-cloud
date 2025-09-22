@@ -2,7 +2,7 @@ govee2mqttreference/
 iot_bypass.py
 lancontrolbypass.py\
 .storage/
-custom_components/__pycache__/
+custom_components/govee/__pycache__/
 dev_api.py
 govee_login.py
 iot_bypass copy.py

@@ -20,6 +20,25 @@ _API_DEVICES = f"{_API_BASE}/devices"
 _API_CONTROL = f"{_API_BASE}/devices/control"
 
 
+def _normalize_cmd_name(name: str) -> str:
+    """Normalize command names for loose matching."""
+
+    return name.replace("-", "_").strip().lower()
+
+
+def _is_color_temp_command_name(name: str) -> bool:
+    """Return True if the command name refers to color temperature control."""
+
+    norm = _normalize_cmd_name(name)
+    if not norm:
+        return False
+    if "colortem" in norm:
+        return True
+    if "color_temp" in norm:
+        return True
+    return False
+
+
 class _Coalescer:
     """Coalesce rapid updates and emit only the latest after a delay."""
 
@@ -606,9 +625,9 @@ class GoveeClient:
                     if key in props and isinstance(props[key], dict):
                         _parse_range_dict(props[key].get("range"))
 
-            support_cmds = [
-                cmd.lower() for cmd in item.get("supportCmds", []) if isinstance(cmd, str)
-            ]
+            raw_support_cmds = [cmd for cmd in item.get("supportCmds", []) if isinstance(cmd, str)]
+            support_cmds = [cmd.lower() for cmd in raw_support_cmds]
+            has_ct_cmd = any(_is_color_temp_command_name(cmd) for cmd in raw_support_cmds)
             # Apply model-specific quirks if known
             model = item.get("model") or item.get("sku") or item.get("type") or "unknown"
             quirk = resolve_quirk(model) if model else None
@@ -674,7 +693,7 @@ class GoveeClient:
                     )
                 if support_cmds or derived_ct or (ct_min is not None or ct_max is not None):
                     dev_obj.support_color_temp = (
-                        "colortem" in support_cmds or derived_ct or (ct_min is not None or ct_max is not None)
+                        has_ct_cmd or derived_ct or (ct_min is not None or ct_max is not None)
                     )
                 dev_obj.color_temp_min = ct_min
                 dev_obj.color_temp_max = ct_max
@@ -705,7 +724,7 @@ class GoveeClient:
                     ),
                     # Consider color temp supported if API lists command OR we detected a CT range
                     support_color_temp=(
-                        "colortem" in support_cmds or derived_ct or (ct_min is not None or ct_max is not None)
+                        has_ct_cmd or derived_ct or (ct_min is not None or ct_max is not None)
                     ),
                     color_temp_min=ct_min,
                     color_temp_max=ct_max,
@@ -835,7 +854,7 @@ class GoveeClient:
                     return False, f"Command {command} not supported"
                 if command_l == "color" and not device.support_color:
                     return False, f"Command {command} not supported"
-                if command_l == "colortem" and not device.support_color_temp:
+                if command_l in {"colortem", "colortemperature", "colortemperaturek", "colorteminkelvin"} and not device.support_color_temp:
                     return False, f"Command {command} not supported"
 
         payload = {
@@ -886,8 +905,11 @@ class GoveeClient:
                                         int(value.get("b", 0)),
                                     )
                                     device.pending_ct = 0
-                                elif command == "colorTem":
-                                    device.pending_ct = int(value)
+                                elif command.lower() in {"colortem", "colortemperature", "colortemperaturek", "colorteminkelvin"}:
+                                    try:
+                                        device.pending_ct = int(value)
+                                    except Exception:
+                                        device.pending_ct = 0
                                     device.pending_color = (0, 0, 0)
                             except Exception:
                                 pass
@@ -903,7 +925,8 @@ class GoveeClient:
                             if err_iot in {"iot_not_ready", "no_topic", "throttled"}:
                                 return False, "IoT control temporarily unavailable"
                             if err_iot == "unsupported_command":
-                                return False, "IoT command unsupported"
+                                _LOGGER.debug("IoT command %s unsupported; falling back to REST", command)
+                                err_iot = None
                             # Otherwise proceed to REST fallback if available
             except Exception as ex:
                 _LOGGER.debug("IoT control path error: %s", ex)
