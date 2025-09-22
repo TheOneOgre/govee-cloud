@@ -709,6 +709,20 @@ class GoveeClient:
                 dev_obj.config_offline_is_off = learned.config_offline_is_off
                 # Do not restore protocol quirks from storage; re-learn each run (memory-only)
                 # Keep learned CT overrides untouched here; they are managed elsewhere
+                try:
+                    _LOGGER.debug(
+                        "Capabilities ← %s (%s): cmds=%s support_ct=%s range=%s-%s step=%s send_percent=%s",
+                        dev_id,
+                        model,
+                        support_cmds,
+                        dev_obj.support_color_temp,
+                        dev_obj.color_temp_min,
+                        dev_obj.color_temp_max,
+                        dev_obj.color_temp_step,
+                        getattr(dev_obj, "color_temp_send_percent", None),
+                    )
+                except Exception:
+                    pass
             else:
                 self._devices[dev_id] = GoveeDevice(
                     device=dev_id,
@@ -742,6 +756,20 @@ class GoveeClient:
                     learned_color_temp_max=None,
                     # Do not seed protocol quirk preferences from storage (memory-only learning)
                 )
+                try:
+                    created = self._devices[dev_id]
+                    _LOGGER.debug(
+                        "Capabilities ← %s (%s): cmds=%s support_ct=%s range=%s-%s step=%s",
+                        dev_id,
+                        model,
+                        support_cmds,
+                        created.support_color_temp,
+                        created.color_temp_min,
+                        created.color_temp_max,
+                        created.color_temp_step,
+                    )
+                except Exception:
+                    pass
 
         # If any devices still have MAC/ID as name, try the newer Platform API device list to enrich names
         if not platform_enriched_done:
