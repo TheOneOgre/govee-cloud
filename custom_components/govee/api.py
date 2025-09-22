@@ -9,7 +9,14 @@ from aiohttp import ClientSession
 from typing import Any, Dict, List, Tuple, Union
 
 from .models import GoveeDevice, GoveeSource, GoveeLearnedInfo
-from .const import CONF_IOT_EMAIL, CONF_IOT_PASSWORD, DOMAIN
+from .const import (
+    CONF_IOT_EMAIL,
+    CONF_IOT_PASSWORD,
+    DOMAIN,
+    FORCE_CT_MODELS,
+    COLOR_TEMP_KELVIN_MIN,
+    COLOR_TEMP_KELVIN_MAX,
+)
 from .iot_client import APP_VERSION, _ua, _login, _extract_token, GoveeLoginError
 from .quirks import resolve_quirk
 
@@ -549,6 +556,10 @@ class GoveeClient:
         platform_enriched_done = False
 
         _LOGGER.debug("Discovered %s devices from Govee Mobile API", len(items))
+        try:
+            _LOGGER.debug("Mobile API raw devices payload: %s", items)
+        except Exception:
+            pass
         for item in items:
             dev_id = item["device"]
             if dev_id in self._devices:
@@ -631,12 +642,19 @@ class GoveeClient:
             # Apply model-specific quirks if known
             model = item.get("model") or item.get("sku") or item.get("type") or "unknown"
             quirk = resolve_quirk(model) if model else None
+            model_key = model.upper() if isinstance(model, str) else str(model)
+            forced_ct_model = model_key in FORCE_CT_MODELS
             if quirk and quirk.color_temp_range:
                 qmin, qmax = quirk.color_temp_range
                 if ct_min is None:
                     ct_min = int(qmin)
                 if ct_max is None:
                     ct_max = int(qmax)
+            if forced_ct_model:
+                if ct_min is None:
+                    ct_min = COLOR_TEMP_KELVIN_MIN
+                if ct_max is None:
+                    ct_max = COLOR_TEMP_KELVIN_MAX
 
             # Derive support flags from capabilities if supportCmds is missing/empty
             derived_turn = False
@@ -691,9 +709,9 @@ class GoveeClient:
                     dev_obj.support_color = (
                         "color" in support_cmds or "colorwc" in support_cmds or derived_color
                     )
-                if support_cmds or derived_ct or (ct_min is not None or ct_max is not None):
+                if support_cmds or derived_ct or (ct_min is not None or ct_max is not None) or forced_ct_model:
                     dev_obj.support_color_temp = (
-                        has_ct_cmd or derived_ct or (ct_min is not None or ct_max is not None)
+                        has_ct_cmd or derived_ct or (ct_min is not None or ct_max is not None) or forced_ct_model
                     )
                 dev_obj.color_temp_min = ct_min
                 dev_obj.color_temp_max = ct_max
@@ -711,7 +729,7 @@ class GoveeClient:
                 # Keep learned CT overrides untouched here; they are managed elsewhere
                 try:
                     _LOGGER.debug(
-                        "Capabilities ← %s (%s): cmds=%s support_ct=%s range=%s-%s step=%s send_percent=%s",
+                        "Capabilities ← %s (%s): cmds=%s support_ct=%s range=%s-%s step=%s send_percent=%s forced_ct=%s",
                         dev_id,
                         model,
                         support_cmds,
@@ -720,6 +738,7 @@ class GoveeClient:
                         dev_obj.color_temp_max,
                         dev_obj.color_temp_step,
                         getattr(dev_obj, "color_temp_send_percent", None),
+                        forced_ct_model,
                     )
                 except Exception:
                     pass
@@ -738,7 +757,7 @@ class GoveeClient:
                     ),
                     # Consider color temp supported if API lists command OR we detected a CT range
                     support_color_temp=(
-                        has_ct_cmd or derived_ct or (ct_min is not None or ct_max is not None)
+                        has_ct_cmd or derived_ct or (ct_min is not None or ct_max is not None) or forced_ct_model
                     ),
                     color_temp_min=ct_min,
                     color_temp_max=ct_max,
@@ -759,7 +778,7 @@ class GoveeClient:
                 try:
                     created = self._devices[dev_id]
                     _LOGGER.debug(
-                        "Capabilities ← %s (%s): cmds=%s support_ct=%s range=%s-%s step=%s",
+                        "Capabilities ← %s (%s): cmds=%s support_ct=%s range=%s-%s step=%s forced_ct=%s",
                         dev_id,
                         model,
                         support_cmds,
@@ -767,6 +786,7 @@ class GoveeClient:
                         created.color_temp_min,
                         created.color_temp_max,
                         created.color_temp_step,
+                        forced_ct_model,
                     )
                 except Exception:
                     pass
@@ -1145,16 +1165,34 @@ class GoveeClient:
                     c = p["color"]
                     new_color = (c.get("r", 0), c.get("g", 0), c.get("b", 0))
                 if "colorTemInKelvin" in p:
+                    if not device.support_color_temp:
+                        device.support_color_temp = True
+                    if device.color_temp_min is None:
+                        device.color_temp_min = COLOR_TEMP_KELVIN_MIN
+                    if device.color_temp_max is None:
+                        device.color_temp_max = COLOR_TEMP_KELVIN_MAX
                     try:
                         new_ct = int(p["colorTemInKelvin"]) or 0
                     except Exception:
                         pass
                 elif "colorTemperatureK" in p:
+                    if not device.support_color_temp:
+                        device.support_color_temp = True
+                    if device.color_temp_min is None:
+                        device.color_temp_min = COLOR_TEMP_KELVIN_MIN
+                    if device.color_temp_max is None:
+                        device.color_temp_max = COLOR_TEMP_KELVIN_MAX
                     try:
                         new_ct = int(p["colorTemperatureK"]) or 0
                     except Exception:
                         pass
                 elif "colorTem" in p:
+                    if not device.support_color_temp:
+                        device.support_color_temp = True
+                    if device.color_temp_min is None:
+                        device.color_temp_min = COLOR_TEMP_KELVIN_MIN
+                    if device.color_temp_max is None:
+                        device.color_temp_max = COLOR_TEMP_KELVIN_MAX
                     # Some devices report CT as 0–100 percent; map to Kelvin
                     try:
                         pct = int(p["colorTem"])  # 0–100

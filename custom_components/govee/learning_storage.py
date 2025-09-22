@@ -12,10 +12,13 @@ LEARNING_SCHEMA_VERSION = 1
 
 
 class GoveeLearningStorage:
-    def __init__(self, config_dir: str, hass=None) -> None:
+    def __init__(self, config_dir: str, hass=None, *, integration_version: str | None = None) -> None:
         self._hass = hass
         self._config_dir = config_dir
-        self._integration_version = self._load_manifest_version()
+        if integration_version is not None:
+            self._integration_version = integration_version
+        else:
+            self._integration_version = self._load_manifest_version()
 
     @staticmethod
     def _load_manifest_version() -> str | None:

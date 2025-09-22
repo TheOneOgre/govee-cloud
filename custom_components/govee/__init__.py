@@ -1,5 +1,7 @@
 """The Govee integration."""
+import json
 import logging
+from pathlib import Path
 
 import homeassistant.helpers.config_validation as cv  # type: ignore
 from homeassistant.config_entries import ConfigEntry  # type: ignore
@@ -27,7 +29,26 @@ async def async_setup(hass: HomeAssistant, config: dict):
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up Govee from a config entry."""
 
-    storage = GoveeLearningStorage(hass.config.config_dir, hass)
+    manifest_version = None
+
+    def _read_manifest_version(manifest_path: Path) -> str | None:
+        try:
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            version = data.get("version")
+            if isinstance(version, str) and version:
+                return version
+        except Exception:
+            return None
+        return None
+
+    try:
+        manifest_path = Path(__file__).with_name("manifest.json")
+        manifest_version = await hass.async_add_executor_job(_read_manifest_version, manifest_path)
+    except Exception:
+        manifest_version = None
+
+    storage = GoveeLearningStorage(hass.config.config_dir, hass, integration_version=manifest_version)
     # API key no longer required; use IoT discovery
     hub = await GoveeClient.create("", storage, hass, config_entry=entry)
 
@@ -139,5 +160,3 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Handle reload of a config entry."""
     await async_unload_entry(hass, entry)
     await async_setup_entry(hass, entry)
-
-

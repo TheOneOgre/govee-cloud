@@ -18,7 +18,15 @@ import requests
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from cryptography.hazmat.primitives.serialization.pkcs12 import load_key_and_certificates
 from paho.mqtt.client import Client as MqttClient, MQTTMessageInfo
-from .const import DOMAIN, CONF_IOT_EMAIL, CONF_IOT_PASSWORD, CONF_IOT_PUSH_ENABLED, CONF_IOT_CONTROL_ENABLED
+from .const import (
+    DOMAIN,
+    CONF_IOT_EMAIL,
+    CONF_IOT_PASSWORD,
+    CONF_IOT_PUSH_ENABLED,
+    CONF_IOT_CONTROL_ENABLED,
+    COLOR_TEMP_KELVIN_MIN,
+    COLOR_TEMP_KELVIN_MAX,
+)
 
 
 class GoveeLoginError(Exception):
@@ -633,6 +641,15 @@ class GoveeIoTClient:
                 c = state["color"]
                 new_color = (int(c.get("r", 0)), int(c.get("g", 0)), int(c.get("b", 0)))
             if "colorTemInKelvin" in state:
+                try:
+                    if not getattr(dev, "support_color_temp", False):
+                        dev.support_color_temp = True
+                    if getattr(dev, "color_temp_min", None) is None:
+                        dev.color_temp_min = COLOR_TEMP_KELVIN_MIN
+                    if getattr(dev, "color_temp_max", None) is None:
+                        dev.color_temp_max = COLOR_TEMP_KELVIN_MAX
+                except Exception:
+                    pass
                 try:
                     new_ct = int(state.get("colorTemInKelvin") or 0)
                 except Exception:
