@@ -1,6 +1,7 @@
 # Govee Home Assistant Integration
 
 Control Govee lights in Home Assistant with fast IoT push updates and reliable cloud fallback.
+
 If this integration helps you, please star it!
 
 ## Highlights
