@@ -1,0 +1,15 @@
+govee2mqttreference/
+iot_bypass.py
+lancontrolbypass.py\
+.storage/
+custom_components/govee/__pycache__/
+dev_api.py
+govee_login.py
+iot_bypass copy.py
+iot_bypass.py
+decomp/
+tests/
+.continue/
+goveeworkingmqtt/
+.iot_test_cache/
+iottest.py
