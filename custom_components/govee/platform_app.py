@@ -172,6 +172,81 @@ class PlatformAppClient:
             _LOGGER.debug("PlatformApp control_brightness failed: %s", ex)
             return False
 
+    async def fetch_device_scenes(self, sku: str, device: str, *, diy: bool = False):
+        """Return raw scene capability payloads from the mobile router API."""
+
+        if not sku or not device:
+            return None
+
+        import uuid as _uuid
+
+        url_suffix = "diy-scenes" if diy else "scenes"
+        url = f"https://openapi.api.govee.com/router/api/v1/device/{url_suffix}"
+        payload = {
+            "requestId": str(_uuid.uuid4()),
+            "payload": {"sku": sku, "device": device},
+        }
+        try:
+            return await self._post(url, payload)
+        except Exception as ex:
+            _LOGGER.debug(
+                "PlatformApp fetch_device_%sscenes failed for %s/%s: %s",
+                "diy_" if diy else "",
+                sku,
+                device,
+                ex,
+            )
+            return None
+
+    async def fetch_light_effect_library(self, sku: str):
+        """Fetch the light effect catalog (scene list) for a SKU from app2."""
+
+        if not sku:
+            return None
+
+        url = f"https://app2.govee.com/appsku/v1/light-effect-libraries?sku={sku}"
+
+        headers = {
+            "AppVersion": APP_VERSION,
+            "User-Agent": _ua(),
+        }
+
+        loop = asyncio.get_running_loop()
+
+        def _do():
+            resp = requests.get(url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+
+        try:
+            return await loop.run_in_executor(None, _do)
+        except Exception as ex:
+            _LOGGER.debug(
+                "PlatformApp fetch_light_effect_library failed for %s: %s",
+                sku,
+                ex,
+            )
+            return None
+
+    async def fetch_scene_effects(self, param_ids):
+        """Fetch effect strings for the provided scene param IDs."""
+
+        ids = [int(pid) for pid in param_ids if isinstance(pid, (int, float))]
+        if not ids:
+            return None
+
+        url = "https://app2.govee.com/bff-app/v1/devices/scenes/effect-strs"
+        payload = {"scenceParamIds": ids}
+
+        try:
+            return await self._post(url, payload)
+        except Exception as ex:
+            _LOGGER.debug(
+                "PlatformApp fetch_scene_effects failed: %s",
+                ex,
+            )
+            return None
+
     async def list_devices(self) -> Dict[str, Any]:
         """Fetch devices with capabilities via the Platform (router) API.
 

@@ -419,7 +419,7 @@ class GoveeLightEntity(LightEntity):
     def device_info(self):
         dev = self._device
         return {
-            "identifiers": {(DOMAIN, self.unique_id)},
+            "identifiers": {(DOMAIN, dev.device)} if dev else {(DOMAIN, self._device_id)},
             "name": dev.device_name if dev else "Unknown",
             "manufacturer": "Govee",
             "model": dev.model if dev else "Unknown",

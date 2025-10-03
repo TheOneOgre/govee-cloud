@@ -6,6 +6,7 @@ from pathlib import Path
 import homeassistant.helpers.config_validation as cv  # type: ignore
 from homeassistant.config_entries import ConfigEntry  # type: ignore
 from homeassistant.core import HomeAssistant  # type: ignore
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from .const import DOMAIN, CONF_IOT_EMAIL, CONF_IOT_PASSWORD, CONF_IOT_PUSH_ENABLED
 from .iot_client import GoveeIoTClient
@@ -14,7 +15,7 @@ from .learning_storage import GoveeLearningStorage
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[str] = ["light"]
+PLATFORMS: list[str] = ["light", "select"]
 
 # This integration is config-entry only (no YAML options)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -129,6 +130,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    hass.async_create_task(_async_cleanup_stale_devices(hass, entry))
+
     return True
 
 
@@ -160,3 +163,17 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Handle reload of a config entry."""
     await async_unload_entry(hass, entry)
     await async_setup_entry(hass, entry)
+
+
+async def _async_cleanup_stale_devices(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove orphaned device registry entries created by older identifiers."""
+
+    dev_reg = dr.async_get(hass)
+    ent_reg = er.async_get(hass)
+
+    for device_entry in list(dev_reg.devices.values()):
+        if entry.entry_id not in device_entry.config_entries:
+            continue
+        if any(ent.device_id == device_entry.id for ent in ent_reg.entities.values()):
+            continue
+        dev_reg.async_remove_device(device_entry.id)

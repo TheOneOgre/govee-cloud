@@ -1426,6 +1426,62 @@ class GoveeIoTClient:
                 self._mark_device_offline(device_id)
             return False, "iot_no_confirm"
         command_l = command.lower()
+        if command_l == "scene":
+            scene_name: str | None = None
+            scene_param_id: int | None = None
+            scene_scene_id: int | None = None
+            commands: list[str] | None = None
+            if isinstance(value, str):
+                scene_name = value
+            elif isinstance(value, dict):
+                scene_name = value.get("name") or value.get("value")
+                try:
+                    if "param_id" in value:
+                        scene_param_id = int(value["param_id"])
+                except Exception:
+                    scene_param_id = None
+                try:
+                    if "scene_id" in value:
+                        scene_scene_id = int(value["scene_id"])
+                except Exception:
+                    scene_scene_id = None
+                cmds = value.get("commands")
+                if isinstance(cmds, list):
+                    commands = [str(c) for c in cmds if isinstance(c, str) and c]
+            if not scene_name:
+                return False, "invalid_scene"
+
+            if commands:
+                msg_real = {
+                    "cmd": "ptReal",
+                    "data": {"command": commands},
+                    "cmdVersion": 1,
+                    "transaction": f"u_{_ms_ts()}000",
+                    "type": 1,
+                }
+                if self._account_topic:
+                    msg_real["accountTopic"] = self._account_topic
+                payload_real = {"msg": msg_real}
+                if not self._publish(topic, payload_real):
+                    return False, "publish_failed"
+
+            msg["cmd"] = "scene"
+            data_payload: dict[str, Any] = {"value": scene_name}
+            if scene_param_id is not None:
+                data_payload["paramId"] = scene_param_id
+            if scene_scene_id is not None:
+                data_payload["sceneId"] = scene_scene_id
+            msg["data"] = data_payload
+            payload = {"msg": msg}
+            if not self._publish(topic, payload):
+                return False, "publish_failed"
+            try:
+                dev = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
+                if dev is not None:
+                    dev.active_scene = scene_name
+            except Exception:
+                pass
+            return True, None
         if command_l in {"colortem", "colortemperature", "colortemperaturek", "colorteminkelvin"}:
             dev = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
             send_percent = getattr(dev, "color_temp_send_percent", None)

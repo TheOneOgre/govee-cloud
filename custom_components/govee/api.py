@@ -2,11 +2,16 @@
 import aiohttp
 import asyncio
 import certifi
+import json
 import logging
 import ssl
 import time
+from dataclasses import dataclass, field
 from aiohttp import ClientSession
-from typing import Any, Dict, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from .platform_app import PlatformAppClient  # type: ignore
 
 from .models import GoveeDevice, GoveeSource, GoveeLearnedInfo
 from .const import (
@@ -18,6 +23,7 @@ from .const import (
     COLOR_TEMP_KELVIN_MAX,
 )
 from .iot_client import APP_VERSION, _ua, _login, _extract_token, GoveeLoginError
+from .scene_encoder import generate_scene_commands
 from .quirks import resolve_quirk
 
 _LOGGER = logging.getLogger(__name__)
@@ -102,6 +108,16 @@ class _Coalescer:
         return self._future
 
 
+@dataclass
+class SceneOption:
+    """Scene metadata derived from the light-effect library."""
+
+    name: str
+    param_id: int
+    scene_id: int
+    commands: List[str] = field(default_factory=list)
+
+
 class GoveeClient:
     def __init__(self, api_key: str, storage):
         self._api_key = api_key
@@ -135,6 +151,8 @@ class GoveeClient:
         # Post-control reconciliation throttle
         self._last_post_poll: Dict[str, float] = {}
         # Platform App control removed; IoT is preferred
+        self._scene_catalog: Dict[str, List[SceneOption]] = {}
+        self._platform_client: Optional["PlatformAppClient"] = None
 
 
     @classmethod
@@ -873,6 +891,7 @@ class GoveeClient:
                     pass
         except Exception:
             pass
+
         return list(self._devices.values()), None
 
 
@@ -1283,3 +1302,259 @@ class GoveeClient:
                 return
 
         asyncio.create_task(runner())
+
+    async def _get_platform_client(self):
+        """Return a singleton PlatformAppClient if credentials are available."""
+
+        if self._platform_client is not None:
+            return self._platform_client
+        if not self._config_entry:
+            return None
+
+        opts = self._config_entry.options or {}
+        data = self._config_entry.data or {}
+        email = opts.get(CONF_IOT_EMAIL) or data.get(CONF_IOT_EMAIL)
+        password = opts.get(CONF_IOT_PASSWORD) or data.get(CONF_IOT_PASSWORD)
+        if not email or not password:
+            return None
+
+        try:
+            from .platform_app import PlatformAppClient  # type: ignore
+        except Exception:
+            return None
+
+        self._platform_client = PlatformAppClient(email, password)
+        return self._platform_client
+
+    def _parse_scene_library(self, sku: str, payload: Dict[str, Any]) -> List[SceneOption]:
+        """Convert light-effect library payload into scene options."""
+
+        result: List[SceneOption] = []
+        seen: set[str] = set()
+
+        data = payload.get("data") or {}
+        categories = data.get("categories") or []
+        if not isinstance(categories, list):
+            return result
+
+        for category in categories:
+            scenes = category.get("scenes") if isinstance(category, dict) else None
+            if not isinstance(scenes, list):
+                continue
+            for scene in scenes:
+                if not isinstance(scene, dict):
+                    continue
+                name = scene.get("sceneName") or scene.get("analyticName") or ""
+                if not isinstance(name, str):
+                    continue
+                name = name.strip()
+                if not name:
+                    continue
+                effects = scene.get("lightEffects") or []
+                if not isinstance(effects, list) or not effects:
+                    continue
+                first_effect = effects[0] if isinstance(effects[0], dict) else None
+                if not isinstance(first_effect, dict):
+                    continue
+                param_id = first_effect.get("scenceParamId") or first_effect.get("sceneParamId")
+                scene_id = scene.get("sceneId") or first_effect.get("sceneCode")
+                commands: List[str] = []
+                for eff in effects:
+                    if not isinstance(eff, dict):
+                        continue
+                    raw_param = eff.get("scenceParam") or eff.get("sceneParam")
+                    if isinstance(raw_param, str) and raw_param.strip():
+                        commands.append(raw_param.strip())
+                try:
+                    param_id_int = int(param_id)
+                    scene_id_int = int(scene_id)
+                except Exception:
+                    continue
+                key = name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(
+                    SceneOption(
+                        name=name,
+                        param_id=param_id_int,
+                        scene_id=scene_id_int,
+                        commands=commands,
+                    )
+                )
+
+        if not result:
+            _LOGGER.debug("No scenes parsed from effect library for %s", sku)
+        return result
+
+    async def async_get_scene_options(self, device_id: str) -> List[SceneOption]:
+        """Return cached scene options for a device (per SKU)."""
+
+        device = self._devices.get(device_id)
+        if not device:
+            return []
+        sku = (device.model or "").strip()
+        if not sku:
+            return []
+
+        cached = self._scene_catalog.get(sku)
+        if cached is not None:
+            return cached
+
+        client = await self._get_platform_client()
+        if not client:
+            self._scene_catalog[sku] = []
+            return []
+
+        payload = await client.fetch_light_effect_library(sku)
+        if not payload:
+            self._scene_catalog[sku] = []
+            return []
+
+        options = self._parse_scene_library(sku, payload)
+        if options:
+            for opt in options:
+                offline_cmds: List[str] = []
+                try:
+                    if self._hass is not None:
+                        offline_cmds = await self._hass.async_add_executor_job(
+                            generate_scene_commands,
+                            opt.scene_id,
+                            opt.param_id,
+                        )
+                    else:
+                        offline_cmds = generate_scene_commands(opt.scene_id, opt.param_id)
+                except Exception as err:
+                    _LOGGER.debug(
+                        "Scene synthesis failed for %s/%s: %s",
+                        opt.scene_id,
+                        opt.param_id,
+                        err,
+                    )
+                else:
+                    if offline_cmds:
+                        opt.commands = offline_cmds
+            effect_map = await self._fetch_scene_effects([opt.param_id for opt in options])
+            if effect_map:
+                for opt in options:
+                    commands = effect_map.get(opt.param_id)
+                    if commands:
+                        opt.commands = commands
+        self._scene_catalog[sku] = options
+        return options
+
+    async def async_set_scene(self, device_id: str, scene_name: str) -> Tuple[bool, Optional[str]]:
+        """Attempt to set the scene by name via the Platform API."""
+
+        device = self._devices.get(device_id)
+        if not device:
+            return False, "unknown_device"
+
+        scenes = await self.async_get_scene_options(device_id)
+        target = next((opt for opt in scenes if opt.name == scene_name), None)
+        if not target:
+            return False, "unknown_scene"
+
+        try:
+            synthesized = generate_scene_commands(int(target.scene_id), target.param_id)
+        except Exception as err:
+            _LOGGER.debug("Scene command synthesis failed for %s/%s: %s", target.scene_id, target.param_id, err)
+        else:
+            if synthesized:
+                target.commands = synthesized
+        if not target.commands:
+            effect_map = await self._fetch_scene_effects([target.param_id])
+            commands = effect_map.get(target.param_id) if effect_map else None
+            if commands:
+                target.commands = commands
+
+        try:
+            await self._ensure_iot_started()
+        except Exception:
+            pass
+
+        iot_client = None
+        if self._hass and self._config_entry:
+            entry_bucket = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id)
+            if entry_bucket:
+                iot_client = entry_bucket.get("iot_client")
+
+        if not iot_client:
+            return False, "iot_not_ready"
+
+        payload = {
+            "name": target.name,
+            "param_id": target.param_id,
+            "scene_id": target.scene_id,
+        }
+        if target.commands:
+            payload["commands"] = target.commands
+
+        ok, err = await iot_client.async_publish_control(device.device, "scene", payload)
+        if ok:
+            try:
+                device.active_scene = target.name
+                device.pending_until = time.monotonic() + 5.0
+            except Exception:
+                pass
+            return True, None
+        return False, err or "iot_publish_failed"
+
+    async def _fetch_scene_effects(self, param_ids: List[int]) -> Dict[int, List[str]]:
+        """Fetch base64 effect strings for given scene param IDs."""
+
+        unique_ids = []
+        for pid in param_ids:
+            try:
+                unique_ids.append(int(pid))
+            except Exception:
+                continue
+        unique_ids = sorted(set(unique_ids))
+        if not unique_ids:
+            return {}
+
+        client = await self._get_platform_client()
+        if not client:
+            return {}
+
+        response = await client.fetch_scene_effects(unique_ids)
+        if not response:
+            return {}
+
+        effect_map: Dict[int, List[str]] = {}
+        try:
+            payload = response.get("data") if isinstance(response, dict) else None
+            effect_list = payload.get("effectStrs") if isinstance(payload, dict) else None
+            if isinstance(effect_list, list):
+                for item in effect_list:
+                    if not isinstance(item, dict):
+                        continue
+                    pid = item.get("scenceParamId") or item.get("sceneParamId")
+                    try:
+                        pid_int = int(pid)
+                    except Exception:
+                        continue
+                    effect = item.get("effectStr")
+                    commands: List[str] = []
+                    if isinstance(effect, str) and effect.strip():
+                        cleaned = effect.strip()
+                        parsed = None
+                        try:
+                            parsed = json.loads(cleaned)
+                        except Exception:
+                            parsed = None
+                        if isinstance(parsed, list):
+                            commands = [str(seg).strip() for seg in parsed if isinstance(seg, (str, bytes)) and str(seg).strip()]
+                        if not commands:
+                            for delimiter in ("|", ",", ";"):
+                                if delimiter in cleaned:
+                                    commands = [segment.strip() for segment in cleaned.split(delimiter) if segment.strip()]
+                                    if commands:
+                                        break
+                        if not commands:
+                            commands = [cleaned]
+                    effect_map[pid_int] = commands
+        except Exception as err:
+            _LOGGER.debug("Scene effect parse failed: %s", err)
+
+        return effect_map

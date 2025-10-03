@@ -1,6 +1,5 @@
 govee2mqttreference/
 iot_bypass.py
-lancontrolbypass.py\
 .storage/
 custom_components/govee/__pycache__/
 dev_api.py
@@ -13,3 +12,7 @@ tests/
 goveeworkingmqtt/
 .iot_test_cache/
 iottest.py
+movetoha.sh
+.devcontainer/
+gvhb/
+tools/
