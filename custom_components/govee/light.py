@@ -3,9 +3,12 @@ import asyncio
 import logging
 from datetime import timedelta
 
-from homeassistant.util import color  # type: ignore
+import voluptuous as vol
 from homeassistant.const import CONF_DELAY  # type: ignore
+from homeassistant.exceptions import HomeAssistantError  # type: ignore
+from homeassistant.helpers import config_validation as cv, entity_platform  # type: ignore
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed  # type: ignore
+from homeassistant.util import color  # type: ignore
 
 
 from homeassistant.components.light import (  # type: ignore
@@ -33,6 +36,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 DEFAULT_SCAN_INTERVAL = 60  # safe fallback
+_SEGMENT_MASK_LEN = 9
 
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up the Govee Light platform."""
@@ -98,6 +102,36 @@ async def async_setup_entry(hass, entry, async_add_entities):
     entities = [GoveeLightEntity(hub, entry.title, coordinator, dev) for dev in devices]
     _LOGGER.debug("Registering %s Govee light entities", len(entities))
     async_add_entities(entities, update_before_add=True)
+
+    platform = entity_platform.async_get_current_platform()
+    platform.async_register_entity_service(
+        "set_segment_color",
+        vol.Schema(
+            {
+                vol.Optional("segment"): vol.All(vol.Coerce(int), vol.Range(min=0, max=2)),
+                vol.Optional("positions"): vol.All(
+                    cv.ensure_list,
+                    [vol.All(vol.Coerce(int), vol.Range(min=0, max=_SEGMENT_MASK_LEN - 1))],
+                ),
+                vol.Optional("zone", default="top"): vol.Any(
+                    vol.In({"top", "middle", "bottom", "front"}),
+                    vol.All(vol.Coerce(int), vol.In({1, 2, 3, 4})),
+                ),
+                vol.Optional("rgb_color"): vol.All(
+                    cv.ensure_list,
+                    vol.Length(min=3, max=3),
+                    [vol.All(vol.Coerce(int), vol.Range(min=0, max=255))],
+                ),
+                vol.Optional("hs_color"): vol.All(
+                    cv.ensure_list,
+                    vol.Length(min=2, max=2),
+                    [vol.Coerce(float)],
+                ),
+                vol.Optional("color_name"): cv.string,
+            }
+        ),
+        "async_set_segment_color",
+    )
 
 
 
@@ -403,6 +437,59 @@ class GoveeLightEntity(LightEntity):
             self.async_write_ha_state()
         else:
             _LOGGER.warning("async_turn_off failed for %s: %s", dev.device, err)
+
+
+    async def async_set_segment_color(
+        self,
+        segment: int | None = None,
+        positions: list[int] | None = None,
+        zone: str | int = "top",
+        rgb_color: list[int] | None = None,
+        hs_color: list[float] | None = None,
+        color_name: str | None = None,
+    ) -> None:
+        dev = self._device
+        if not dev or dev.model.upper() != "H60B0":
+            raise HomeAssistantError("Segment control is only available for the Govee H60B0 light bar.")
+
+        if rgb_color is not None:
+            if len(rgb_color) != 3:
+                raise HomeAssistantError("rgb_color must have exactly three values.")
+            rgb = tuple(int(max(0, min(255, v))) for v in rgb_color)
+        elif hs_color is not None:
+            if len(hs_color) != 2:
+                raise HomeAssistantError("hs_color must contain hue and saturation.")
+            rgb = color.color_hs_to_RGB(float(hs_color[0]), float(hs_color[1]))
+        elif color_name:
+            try:
+                rgb = color.color_name_to_rgb(color_name)
+            except KeyError as err:
+                raise HomeAssistantError(f"Unknown color name: {color_name}") from err
+        else:
+            raise HomeAssistantError("Provide rgb_color, hs_color or color_name.")
+
+        mask = [False] * _SEGMENT_MASK_LEN
+        if positions:
+            for idx in positions:
+                if idx < 0 or idx >= _SEGMENT_MASK_LEN:
+                    raise HomeAssistantError("Segment position must be between 0 and 8.")
+                mask[int(idx)] = True
+        elif segment is not None:
+            if segment < 0 or segment > 2:
+                raise HomeAssistantError("segment must be 0, 1 or 2.")
+            base = segment * 3
+            for offset in range(3):
+                mask[base + offset] = True
+        else:
+            mask = [True] * _SEGMENT_MASK_LEN
+
+        if not any(mask):
+            raise HomeAssistantError("No LEDs selected for segment control.")
+
+        ok, err = await self._hub.set_segment_color(self._device_id, rgb, mask, zone=zone)
+        if not ok:
+            raise HomeAssistantError(err or "Segment command failed")
+        await self._coordinator.async_request_refresh()
 
 
 

@@ -1,4 +1,5 @@
 """Minimal Govee API client."""
+import base64
 import aiohttp
 import asyncio
 import certifi
@@ -8,7 +9,7 @@ import ssl
 import time
 from dataclasses import dataclass, field
 from aiohttp import ClientSession
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
 
 if TYPE_CHECKING:
     from .platform_app import PlatformAppClient  # type: ignore
@@ -19,6 +20,8 @@ from .const import (
     CONF_IOT_PASSWORD,
     DOMAIN,
     FORCE_CT_MODELS,
+    SCENE_PTREAL_ONLY_MODELS,
+    SCENE_PTREAL_CMD_VERSION,
     COLOR_TEMP_KELVIN_MIN,
     COLOR_TEMP_KELVIN_MAX,
 )
@@ -703,6 +706,9 @@ class GoveeClient:
                 if {"colortemperaturek", "colortem", "color_temperature_k"} & keys:
                     derived_ct = True
 
+            if forced_ct_model:
+                derived_ct = True
+
             # If we still have no capability information at all (mobile list often lacks it),
             # assume basic light capabilities to allow control attempts. API will reject if invalid.
             if not support_cmds and not any([derived_turn, derived_brightness, derived_color, derived_ct]):
@@ -713,6 +719,11 @@ class GoveeClient:
             controllable_flag = item.get("controllable")
             retrievable_flag = item.get("retrievable")
             name_val = item.get("deviceName") or item.get("device_name") or dev_id
+            color_cmd_support = (
+                "color" in support_cmds
+                or "colorwc" in support_cmds
+            )
+
             if dev_id in self._devices:
                 # Update existing device object in place
                 dev_obj = self._devices[dev_id]
@@ -723,10 +734,13 @@ class GoveeClient:
                 dev_obj.support_cmds = support_cmds
                 dev_obj.support_turn = ("turn" in support_cmds) or derived_turn
                 dev_obj.support_brightness = ("brightness" in support_cmds) or derived_brightness
-                if support_cmds or derived_color:
-                    dev_obj.support_color = (
-                        "color" in support_cmds or "colorwc" in support_cmds or derived_color
-                    )
+                if color_cmd_support or derived_color:
+                    dev_obj.support_color = True
+                elif not support_cmds and not derived_color:
+                    # Keep previous knowledge when the API omits capabilities entirely
+                    dev_obj.support_color = dev_obj.support_color or False
+                else:
+                    dev_obj.support_color = False
                 if support_cmds or derived_ct or (ct_min is not None or ct_max is not None) or forced_ct_model:
                     dev_obj.support_color_temp = (
                         has_ct_cmd or derived_ct or (ct_min is not None or ct_max is not None) or forced_ct_model
@@ -761,6 +775,7 @@ class GoveeClient:
                 except Exception:
                     pass
             else:
+                color_unknown = not support_cmds and not derived_color
                 self._devices[dev_id] = GoveeDevice(
                     device=dev_id,
                     model=model,
@@ -770,9 +785,7 @@ class GoveeClient:
                     support_cmds=support_cmds,
                     support_turn=("turn" in support_cmds) or derived_turn,
                     support_brightness=("brightness" in support_cmds) or derived_brightness,
-                    support_color=(
-                        "color" in support_cmds or "colorwc" in support_cmds or derived_color
-                    ),
+                    support_color=(color_cmd_support or derived_color or color_unknown),
                     # Consider color temp supported if API lists command OR we detected a CT range
                     support_color_temp=(
                         has_ct_cmd or derived_ct or (ct_min is not None or ct_max is not None) or forced_ct_model
@@ -1303,6 +1316,104 @@ class GoveeClient:
 
         asyncio.create_task(runner())
 
+    @staticmethod
+    def _segment_zone_code(zone: str | int) -> Optional[int]:
+        """Return the ptReal zone selector for H60B0 segments."""
+
+        if isinstance(zone, int):
+            if zone in {1, 2, 3, 4}:
+                return zone
+            return None
+        zone_norm = str(zone).strip().lower()
+        zone_map = {
+            "bottom": 3,
+            "middle": 2,
+            "top": 4,
+            "front": 1,
+        }
+        return zone_map.get(zone_norm)
+
+    @staticmethod
+    def _mask_to_bytes(mask: Sequence[bool]) -> bytes:
+        bits = list(mask)[:16]
+        if len(bits) < 16:
+            bits.extend([False] * (16 - len(bits)))
+        first = bits[:8]
+        second = bits[8:16]
+        def _pack(chunk: Sequence[bool]) -> int:
+            # Match BleUtils.makeSelectedTwoBytes(..., reverse=True)
+            bit_str = ''.join('1' if b else '0' for b in chunk)[::-1]
+            return int(bit_str, 2)
+        return bytes((_pack(first), _pack(second)))
+
+    @classmethod
+    def _build_segment_frame(
+        cls,
+        zone_code: int,
+        rgb: Tuple[int, int, int],
+        mask: Sequence[bool],
+        kelvin: Optional[int] = None,
+    ) -> bytes:
+        if zone_code not in {1, 2, 3, 4}:
+            raise ValueError("invalid zone code")
+        if len(mask) == 0 or not any(mask):
+            raise ValueError("mask must select at least one position")
+        r, g, b = (max(0, min(255, int(v))) for v in rgb)
+        rgb_bytes = bytes([r, g, b])
+        mask_bytes = cls._mask_to_bytes(mask)
+        if kelvin is not None:
+            kelvin = max(0, min(65535, int(kelvin)))
+            kelvin_bytes = kelvin.to_bytes(2, byteorder="big", signed=False)
+            return bytes([5, 44, zone_code, 1]) + rgb_bytes + kelvin_bytes + mask_bytes
+        return bytes([5, 44, zone_code, 1]) + rgb_bytes + bytes([0, 0]) + mask_bytes
+
+    async def set_segment_color(
+        self,
+        device_id: str,
+        rgb: Tuple[int, int, int],
+        mask: Sequence[bool],
+        *,
+        zone: str | int = "top",
+        kelvin: Optional[int] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        """Send a ptReal command for segmented color control (H60B0)."""
+
+        zone_code = self._segment_zone_code(zone)
+        if zone_code is None:
+            return False, "invalid_zone"
+        try:
+            frame = self._build_segment_frame(zone_code, rgb, mask, kelvin)
+        except ValueError as ex:
+            return False, str(ex)
+
+        if not (self._hass and self._config_entry):
+            return False, "missing_hass"
+        try:
+            from .const import DOMAIN  # type: ignore
+            entry_bucket = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id)
+            iot_client = entry_bucket and entry_bucket.get("iot_client")
+        except Exception:
+            iot_client = None
+        if not iot_client or not hasattr(iot_client, "async_publish_ptreal"):
+            return False, "iot_not_ready"
+
+        ok, err = await iot_client.async_publish_ptreal(device_id, [frame])
+        if ok:
+            dev = self._devices.get(device_id)
+            if dev is not None:
+                try:
+                    dev.pending_color = (
+                        max(0, min(255, int(rgb[0]))),
+                        max(0, min(255, int(rgb[1]))),
+                        max(0, min(255, int(rgb[2]))),
+                    )
+                    dev.pending_ct = 0
+                    dev.pending_until = time.monotonic() + 5.0
+                except Exception:
+                    pass
+            self._schedule_post_control_poll(device_id)
+        return ok, err
+
     async def _get_platform_client(self):
         """Return a singleton PlatformAppClient if credentials are available."""
 
@@ -1455,6 +1566,9 @@ class GoveeClient:
         if not target:
             return False, "unknown_scene"
 
+        model_upper = (device.model or "").upper()
+        prefer_ptreal_only = model_upper in SCENE_PTREAL_ONLY_MODELS
+        ptreal_cmd_version = SCENE_PTREAL_CMD_VERSION.get(model_upper, 1)
         try:
             synthesized = generate_scene_commands(int(target.scene_id), target.param_id)
         except Exception as err:
@@ -1482,16 +1596,42 @@ class GoveeClient:
         if not iot_client:
             return False, "iot_not_ready"
 
+        # Attempt to send ptReal frames first when available
+        ptreal_success = False
+        if target.commands:
+            frames: List[bytes] = []
+            for cmd in target.commands:
+                try:
+                    frames.append(base64.b64decode(cmd))
+                except Exception:
+                    continue
+            if frames:
+                ok_pt, err_pt = await iot_client.async_publish_ptreal(
+                    device.device,
+                    frames,
+                    cmd_version=ptreal_cmd_version,
+                )
+                if not ok_pt and err_pt:
+                    _LOGGER.debug("Scene ptReal publish failed for %s: %s", device.device, err_pt)
+                ptreal_success = ok_pt
+                if ok_pt and prefer_ptreal_only:
+                    try:
+                        device.active_scene = target.name
+                        device.pending_until = time.monotonic() + 5.0
+                    except Exception:
+                        pass
+                    return True, None
+
         payload = {
             "name": target.name,
             "param_id": target.param_id,
             "scene_id": target.scene_id,
         }
-        if target.commands:
+        if target.commands and not prefer_ptreal_only:
             payload["commands"] = target.commands
 
         ok, err = await iot_client.async_publish_control(device.device, "scene", payload)
-        if ok:
+        if ok or ptreal_success:
             try:
                 device.active_scene = target.name
                 device.pending_until = time.monotonic() + 5.0

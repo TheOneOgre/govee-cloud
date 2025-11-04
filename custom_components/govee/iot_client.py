@@ -174,6 +174,7 @@ class GoveeIoTClient:
         self._miss_counts: dict[str, int] = {}
         self._status_miss_threshold: int = 2
         self._ping_interval: float = 5 * 60.0
+        self._offline_grace: float = max(300.0, self._ping_interval * 1.5)
         self._ping_task: asyncio.Task | None = None
         self._status_timers: dict[str, asyncio.Task] = {}
         self._alt_status_models: set[str] = {"H6121"}
@@ -953,7 +954,8 @@ class GoveeIoTClient:
             if online is False:
                 self._last_seen_wall.pop(device_id, None)
             else:
-                self._last_seen_wall[device_id] = float(when) if when is not None else time.time()
+                ts = float(when) if when is not None else time.time()
+                self._last_seen_wall[device_id] = ts
         except Exception:
             pass
 
@@ -974,6 +976,24 @@ class GoveeIoTClient:
     def _mark_device_offline(self, device_id: str) -> bool:
         dev_local = getattr(self._hub, "_devices", {}).get(device_id) if self._hub else None
         updated = False
+        try:
+            now_wall = time.time()
+            last_seen = self._last_seen_wall.get(device_id)
+            if last_seen is not None:
+                age = max(0.0, now_wall - float(last_seen))
+                if age < self._offline_grace:
+                    try:
+                        _LOGGER.debug(
+                            "Skipping offline mark for %s; last update %.0fs ago (<%.0fs grace)",
+                            device_id,
+                            age,
+                            self._offline_grace,
+                        )
+                    except Exception:
+                        pass
+                    return False
+        except Exception:
+            pass
         if dev_local is not None and getattr(dev_local, "online", True):
             dev_local.online = False
             updated = True
@@ -1624,6 +1644,60 @@ class GoveeIoTClient:
                 self._mark_device_offline(device_id)
             return False, "iot_no_confirm"
         return False, "unsupported_command"
+
+    async def async_publish_ptreal(
+        self,
+        device_id: str,
+        frames: list[bytes | str],
+        *,
+        cmd_version: int = 1,
+    ) -> tuple[bool, str | None]:
+        """Publish raw ptReal frames (base64 encoded) for advanced effects."""
+
+        if not frames:
+            return False, "no_frames"
+        if not self.can_control:
+            return False, "iot_not_ready"
+        topic = self._device_topics.get(device_id)
+        if not topic:
+            _LOGGER.debug("IoT ptReal blocked: No topic for %s", device_id)
+            return False, "no_topic"
+
+        wait = self._pub_bucket_take(1.0)
+        if wait > 0:
+            try:
+                _LOGGER.debug("IoT publish throttled (ptReal %s): waiting %.2fs", device_id, wait)
+            except Exception:
+                pass
+            try:
+                await asyncio.sleep(wait)
+            except asyncio.CancelledError:
+                return False, "throttled"
+
+        encoded: list[str] = []
+        for frame in frames:
+            try:
+                if isinstance(frame, bytes):
+                    encoded.append(base64.b64encode(frame).decode("ascii"))
+                else:
+                    encoded.append(str(frame).strip())
+            except Exception as ex:
+                _LOGGER.debug("ptReal frame conversion failed: %s", ex)
+                return False, "invalid_frame"
+
+        msg = {
+            "cmd": "ptReal",
+            "data": {"command": encoded},
+            "cmdVersion": max(0, int(cmd_version)),
+            "transaction": f"v_{_ms_ts()}000",
+            "type": 1,
+        }
+        if self._account_topic:
+            msg["accountTopic"] = self._account_topic
+        payload = {"msg": msg}
+        if not self._publish(topic, payload):
+            return False, "publish_failed"
+        return True, None
 
     async def async_request_status(self, device_id: str, *, use_alt: bool | None = None) -> bool:
         """Request device status over MQTT, falling back to REST if needed."""

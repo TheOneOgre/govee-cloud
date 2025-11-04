@@ -5,14 +5,13 @@ custom_components/govee/__pycache__/
 dev_api.py
 govee_login.py
 iot_bypass copy.py
-iot_bypass.py
 decomp/
 tests/
-.continue/
-goveeworkingmqtt/
 .iot_test_cache/
 iottest.py
 movetoha.sh
 .devcontainer/
 gvhb/
 tools/
+scene_param_cloud.json
+dump.json

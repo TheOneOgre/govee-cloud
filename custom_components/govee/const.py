@@ -15,6 +15,17 @@ COLOR_TEMP_KELVIN_MAX = 9000
 FORCE_CT_MODELS = {
     "H605B",
     "H615B",
+    "H6008",
+}
+
+# Models whose scene playback relies solely on ptReal bursts (skip follow-up scene command)
+SCENE_PTREAL_ONLY_MODELS = {
+    "H6121",
+}
+
+# Optional cmdVersion overrides for ptReal scene publishes
+SCENE_PTREAL_CMD_VERSION = {
+    "H6121": 0,
 }
 CONF_POLLING_MODE = "polling_mode"
 
